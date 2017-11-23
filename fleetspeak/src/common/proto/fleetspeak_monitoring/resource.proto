@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package fleetspeak.monitoring;
+
+import "google/protobuf/timestamp.proto";
+
+// Contains resource-usage metrics for Fleetspeak clients. The stats are
+// arrived at by aggregating raw data retrieved from the OS.
+// CPU-usage is in milliseconds per second, and memory usage is in bytes.
+message AggregatedResourceUsage {
+  double mean_user_cpu_rate = 1;
+  double max_user_cpu_rate = 2;
+  double mean_system_cpu_rate = 3;
+  double max_system_cpu_rate = 4;
+  double mean_resident_memory = 5;
+  int64 max_resident_memory = 6;
+}
+
+// A fleetspeak.Message with message type "ResourceUsage" is sent regularly by
+// the system and daemon services to the server, to report the performance of
+// processes.
+message ResourceUsageData {
+  // Name of the client service that resource usage is charged/attributed to
+  // e.g 'system' for the system Fleetspeak service, or the name of a daemon
+  // service as specified in its config.
+  string scope = 1;
+
+  int64 pid = 2;
+
+  // Time when the process was started by Fleetspeak.
+  google.protobuf.Timestamp process_start_time = 3;
+
+  // Corresponds to when computation of the resource-usage data was finalized.
+  google.protobuf.Timestamp data_timestamp = 4;
+
+  AggregatedResourceUsage resource_usage = 5;
+
+  // Optional debug info for the process.
+  string debug_status = 6;
+}

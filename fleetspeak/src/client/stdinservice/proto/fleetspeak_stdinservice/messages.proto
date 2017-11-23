@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package fleetspeak.stdinservice;
+
+import "google/protobuf/timestamp.proto";
+import "fleetspeak/src/common/proto/fleetspeak_monitoring/resource.proto";
+
+message InputMessage {
+  // The data to be forwarded to the service.
+  bytes input = 1;
+
+  // Command line arguments.
+  repeated string args = 2;
+}
+
+message OutputMessage {
+  bytes stdout = 1;
+  bytes stderr = 2;
+
+  fleetspeak.monitoring.AggregatedResourceUsage resource_usage = 3;
+
+  // When the message was generated.
+  google.protobuf.Timestamp timestamp = 4;
+}
