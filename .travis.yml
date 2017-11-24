@@ -2,7 +2,7 @@ language: go
 
 python: 2.7
 
-go_import_path: ${GOPATH}/src/github.com/google/fleetspeak
+# go_import_path: ${GOPATH}/src/github.com/google/fleetspeak
 
 before_install:
   - for f in $(find . -type f); do sed -i 's:github.com\/google\/fleetspeak\/fleetspeak:github.com/demonchild2112/fleetspeak-test/fleetspeak-test:g' $f; done
@@ -12,6 +12,7 @@ before_install:
 install:
   #- source "${HOME}/FSENV/bin/activate" && pip install -e .
   - go get -v -t ./... # Install dependencies needed for tests.
+  - cat fleetspeak-test/src/client/client.go
 
 script:
   # - source "${HOME}/FSENV/bin/activate"
