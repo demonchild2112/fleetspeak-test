@@ -10,7 +10,7 @@ before_install:
 
 install:
   - source "${HOME}/FSENV/bin/activate" && pip install -e .
-  - go get -v -t ./... # Install dependencies needed for tests.
+  - cd fleetspeak && go get -v -t ./... # Install dependencies needed for tests.
 
 script:
   - source "${HOME}/FSENV/bin/activate"
