@@ -5,12 +5,13 @@ python: 2.7
 go_import_path: ${GOPATH}/src/github.com/google/fleetspeak
 
 before_install:
+  - for f in $(find . -type f); do sed -i 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
   - pip install --upgrade pip virtualenv
   - virtualenv "${HOME}/FSENV"
 
 install:
   - source "${HOME}/FSENV/bin/activate" && pip install -e .
-  - cd fleetspeak && go get -v -t ./... # Install dependencies needed for tests.
+  - go get -v -t ./... # Install dependencies needed for tests.
 
 script:
   - source "${HOME}/FSENV/bin/activate"
