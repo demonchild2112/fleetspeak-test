@@ -15,4 +15,4 @@ install:
 
 script:
   # - source "${HOME}/FSENV/bin/activate"
-  - fleetspeak-test/build.sh # && fleetspeak/test.sh
+  - fleetspeak/build.sh # && fleetspeak/test.sh
