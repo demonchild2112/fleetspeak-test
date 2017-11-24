@@ -9,10 +9,9 @@ before_install:
   - virtualenv "${HOME}/FSENV"
 
 install:
-  - source "${HOME}/FSENV/bin/activate && pip install -e .
+  - source "${HOME}/FSENV/bin/activate" && pip install -e .
   - go get -v -t ./... # Install dependencies needed for tests.
 
 script:
-  - source "${HOME}/FSENV/bin/activate
-  - fleetspeak/build.sh
-  - fleetspeak/test.sh
+  - source "${HOME}/FSENV/bin/activate"
+  - fleetspeak/build.sh && fleetspeak/test.sh
