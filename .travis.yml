@@ -1,11 +1,18 @@
 language: go
 
-go_import_path: $GOPATH/src/github.com/google/fleetspeak
+python: 2.7
+
+go_import_path: ${GOPATH}/src/github.com/google/fleetspeak
+
+before_install:
+  - pip install --upgrade pip virtualenv
+  - virtualenv "${HOME}/FSENV"
 
 install:
-  - pip install -e .
+  - source "${HOME}/FSENV/bin/activate && pip install -e .
   - go get -v -t ./... # Install dependencies needed for tests.
 
 script:
+  - source "${HOME}/FSENV/bin/activate
   - fleetspeak/build.sh
   - fleetspeak/test.sh
