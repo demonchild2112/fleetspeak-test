@@ -5,7 +5,7 @@ python: 2.7
 # go_import_path: ${GOPATH}/src/github.com/google/fleetspeak
 
 before_install:
-  - for f in $(find . -type f); do sed -i 's:github.com\/google\/fleetspeak\/fleetspeak:github.com/demonchild2112/fleetspeak-test/fleetspeak-test:g' $f; done
+  - for f in $(find . -type f); do sed -i 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
   #- pip install --upgrade pip virtualenv
   #- virtualenv "${HOME}/FSENV"
 
