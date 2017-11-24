@@ -6,13 +6,13 @@ python: 2.7
 
 before_install:
   - for f in $(find . -type f); do sed -i 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
-  #- pip install --upgrade pip virtualenv
-  #- virtualenv "${HOME}/FSENV"
+  - pip install --upgrade pip virtualenv
+  - virtualenv "${HOME}/FSENV"
 
 install:
-  #- source "${HOME}/FSENV/bin/activate" && pip install -e .
+  - source "${HOME}/FSENV/bin/activate" && pip install -e .
   - go get -v -t ./... # Install dependencies needed for tests.
 
 script:
-  # - source "${HOME}/FSENV/bin/activate"
+  - source "${HOME}/FSENV/bin/activate"
   - fleetspeak/build.sh # && fleetspeak/test.sh
