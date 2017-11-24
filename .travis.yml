@@ -1,0 +1,11 @@
+language: go
+
+go_import_path: $GOPATH/src/github.com/google/fleetspeak
+
+install:
+  - pip install -e .
+  - go get -v -t ./... # Install dependencies needed for tests.
+
+script:
+  - fleetspeak/build.sh
+  - fleetspeak/test.sh
