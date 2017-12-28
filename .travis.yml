@@ -19,8 +19,9 @@ matrix:
         - go get -v -t ./... # Install dependencies needed for tests.
       script:
         - source "${HOME}/FSENV/bin/activate"
-        - fleetspeak/build.sh && fleetspeak/test.sh
         - golint ./...
+        - go vet ./...
+        - fleetspeak/build.sh && fleetspeak/test.sh
 
     - os: osx
       sudo: required
@@ -33,7 +34,7 @@ matrix:
         - MYSQL_TEST_ADDR=127.0.0.1:3306
         - GO_INSTALLER=https://redirector.gvt1.com/edgedl/go/go1.9.2.darwin-amd64.pkg
       before_install:
-        - for f in $(find . -type f); do sed -i 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
+      - for f in $(find . -type f); do sed -i~ 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
         # Install go if it is not installed.
         - >-
           [[ -z "$(which go)" ]] && wget "${GO_INSTALLER}" &&
