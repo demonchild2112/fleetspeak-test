@@ -1,16 +1,49 @@
-language: go
+matrix:
+  include:
+    - os: linux
+      language: go
+      python: 2.7
+      services:
+        - mysql
+      env:
+        - MYSQL_TEST_USER=travis
+        - MYSQL_TEST_ADDR=127.0.0.1:3306
+      before_install:
+        - for f in $(find . -type f); do sed -i 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
+        - pip install --upgrade pip virtualenv
+        - virtualenv "${HOME}/FSENV"
+        - mysql --print-defaults
+        - go get -u github.com/golang/lint/golint
+      install:
+        - source "${HOME}/FSENV/bin/activate" && pip install -e .
+        - go get -v -t ./... # Install dependencies needed for tests.
+      script:
+        - source "${HOME}/FSENV/bin/activate"
+        - fleetspeak/build.sh && fleetspeak/test.sh
+        - golint ./...
 
-python: 2.7
-
-before_install:
-  - for f in $(find . -type f); do sed -i 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
-  - pip install --upgrade pip virtualenv
-  - virtualenv "${HOME}/FSENV"
-
-install:
-  - source "${HOME}/FSENV/bin/activate" && pip install -e .
-  - go get -v -t ./... # Install dependencies needed for tests.
-
-script:
-  - source "${HOME}/FSENV/bin/activate"
-  - fleetspeak/build.sh && fleetspeak/test.sh
+    - os: osx
+      sudo: required
+      language: go
+      python: 2.7
+      services:
+        - mysql
+      env:
+        - MYSQL_TEST_USER=travis
+        - MYSQL_TEST_ADDR=127.0.0.1:3306
+        - GO_INSTALLER=https://redirector.gvt1.com/edgedl/go/go1.9.2.darwin-amd64.pkg
+      before_install:
+        - for f in $(find . -type f); do sed -i 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
+        # Install go if it is not installed.
+        - >-
+          [[ -z "$(which go)" ]] && wget "${GO_INSTALLER}" &&
+          sudo installer -pkg go*.darwin-amd64.pkg -target /
+        - pip install --upgrade pip virtualenv
+        - virtualenv "${HOME}/FSENV"
+        - mysql --print-defaults
+      install:
+        - source "${HOME}/FSENV/bin/activate" && pip install -e .
+        - go get -v -t ./... # Install dependencies needed for tests.
+      script:
+        - source "${HOME}/FSENV/bin/activate"
+        - fleetspeak/build.sh && fleetspeak/test.sh
