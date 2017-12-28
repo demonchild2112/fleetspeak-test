@@ -36,9 +36,9 @@ matrix:
       before_install:
         - for f in $(find . -type f); do sed -i~ 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
         # Install go if it is not installed.
+        - echo which which
         - >-
-          [[ -z "$(which go)" ]] && curl -LO# "${GO_INSTALLER}" &&
-          sudo installer -pkg go*.darwin-amd64.pkg -target /
+          if [[ -z "$(which go)" ]]; then curl -LO# "${GO_INSTALLER}"; fi
         - pip install --upgrade pip virtualenv
         - virtualenv "${HOME}/FSENV"
         - mysql --print-defaults
