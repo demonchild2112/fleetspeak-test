@@ -20,7 +20,7 @@ matrix:
       script:
         - source "${HOME}/FSENV/bin/activate"
         - golint ./...
-        - go vet ./...
+        - go vet ./... 2>&1 | tee /dev/stderr
         - fleetspeak/build.sh && fleetspeak/test.sh
 
     - os: osx
@@ -35,13 +35,13 @@ matrix:
         - GO_INSTALLER=https://redirector.gvt1.com/edgedl/go/go1.9.2.darwin-amd64.pkg
       before_install:
         - for f in $(find . -type f); do sed -i~ 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
-        # Install go if it is not installed.
-        - echo which which
-        - >-
-          if [[ -z "$(which go)" ]]; then curl -LO# "${GO_INSTALLER}"; fi
+        - git clone https://github.com/MacPython/terryfy
+        # Install pip.
+        - source terryfy/travis_tools.sh && get_python_environment macpython 2.7.11
         - pip install --upgrade pip virtualenv
         - virtualenv "${HOME}/FSENV"
         - mysql --print-defaults
+        - go version
       install:
         - source "${HOME}/FSENV/bin/activate" && pip install -e .
         - go get -v -t ./... # Install dependencies needed for tests.
