@@ -35,10 +35,9 @@ matrix:
         - GO_INSTALLER=https://redirector.gvt1.com/edgedl/go/go1.9.2.darwin-amd64.pkg
       before_install:
         - for f in $(find . -type f); do sed -i~ 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
-        # Install go if it is not installed.
+        # Install go if it is not installed. && sudo installer -pkg go*.darwin-amd64.pkg -target /
         - >-
-          [[ -z "$(which go)" ]] && wget "${GO_INSTALLER}" &&
-          sudo installer -pkg go*.darwin-amd64.pkg -target /
+          [[ -z "$(which go)" ]] && wget "${GO_INSTALLER}"
         - pip install --upgrade pip virtualenv
         - virtualenv "${HOME}/FSENV"
         - mysql --print-defaults
