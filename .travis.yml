@@ -18,11 +18,12 @@ matrix:
         - source "${HOME}/FSENV/bin/activate" && pip install -e .
         - go get -v -t ./... # Install dependencies needed for tests.
       script:
-        - source "${HOME}/FSENV/bin/activate"
         - golint ./...
-        - go vet ./... 2>&1 || true
+        - go vet ./... || true
+        - source "${HOME}/FSENV/bin/activate"
         - fleetspeak/build.sh && fleetspeak/test.sh
 
+    # Note that mysql is not available in OSX environments.
     - os: osx
       language: go
       python: 2.7
@@ -30,7 +31,9 @@ matrix:
         - for f in $(find . -type f); do sed -i~ 's:github.com\/google\/fleetspeak:github.com/demonchild2112/fleetspeak-test:g' $f; done
         - git clone https://github.com/MacPython/terryfy
         # Install pip.
-        - source terryfy/travis_tools.sh && get_python_environment macpython 2.7.11
+        - >-
+          source terryfy/travis_tools.sh &&
+          get_python_environment macpython 2.7.14
         - pip install --upgrade pip virtualenv
         - virtualenv "${HOME}/FSENV"
         - go version
