@@ -16,6 +16,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/x509"
 	"errors"
@@ -25,8 +26,7 @@ import (
 	"sort"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 
 	"github.com/google/fleetspeak/fleetspeak/src/common"
@@ -49,18 +49,24 @@ type commsContext struct {
 // GetClientInfo loads basic information about a client. Returns nil if the client does
 // not exist in the datastore.
 func (c commsContext) GetClientInfo(ctx context.Context, id common.ClientID) (*comms.ClientInfo, error) {
-	cld, err := c.s.dataStore.GetClientData(ctx, id)
+	cld, cacheHit, err := c.s.clientCache.GetOrRead(ctx, id, c.s.dataStore)
 	if err != nil {
 		if c.s.dataStore.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
+
 	k, err := x509.ParsePKIXPublicKey(cld.Key)
 	if err != nil {
 		return nil, err
 	}
-	return &comms.ClientInfo{ID: id, Key: k, Labels: cld.Labels}, nil
+	return &comms.ClientInfo{
+		ID:          id,
+		Key:         k,
+		Labels:      cld.Labels,
+		Blacklisted: cld.Blacklisted,
+		Cached:      cacheHit}, nil
 }
 
 // AddClient adds a new client to the system.
@@ -76,7 +82,7 @@ func (c commsContext) AddClient(ctx context.Context, id common.ClientID, key cry
 }
 
 func (c commsContext) HandleClientContact(ctx context.Context, info *comms.ClientInfo, addr net.Addr, wcd *fspb.WrappedContactData) (*fspb.ContactData, error) {
-	sigs, err := signatures.ValidateWrappedContactData(wcd)
+	sigs, err := signatures.ValidateWrappedContactData(info.ID, wcd)
 	if err != nil {
 		return nil, err
 	}
@@ -101,9 +107,15 @@ func (c commsContext) HandleClientContact(ctx context.Context, info *comms.Clien
 	if len(cd.Messages) > maxMessagesPerContact {
 		return nil, fmt.Errorf("contact_data contains %d messages, only %d allowed", len(cd.Messages), maxMessagesPerContact)
 	}
-
 	toSend := fspb.ContactData{SequencingNonce: uint64(rand.Int63())}
-	ct, err := c.RecordClientContact(ctx, info, toSend.SequencingNonce, cd.SequencingNonce, addr.String())
+	ct, err := c.s.dataStore.RecordClientContact(ctx,
+		db.ContactData{
+			ClientID:      info.ID,
+			NonceSent:     toSend.SequencingNonce,
+			NonceReceived: cd.SequencingNonce,
+			Addr:          addr.String(),
+			ClientClock:   cd.ClientClock,
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -123,19 +135,30 @@ func (c commsContext) HandleClientContact(ctx context.Context, info *comms.Clien
 // FindMessagesForClient finds unprocessed messages for a given client and
 // reserves them for processing.
 func (c commsContext) FindMessagesForClient(ctx context.Context, info *comms.ClientInfo, contactID db.ContactID, maxMessages int) ([]*fspb.Message, error) {
+	if info.Blacklisted {
+		log.Warningf("Contact from blacklisted id [%v], creating RekeyRequest.", info.ID)
+		m, err := c.MakeBlacklistMessage(ctx, info, contactID)
+		return []*fspb.Message{m}, err
+	}
 	msgs, err := c.s.dataStore.ClientMessagesForProcessing(ctx, info.ID, maxMessages)
 	if err != nil {
 		if len(msgs) == 0 {
 			return nil, err
 		}
-		log.Print("Got %v messages along with error, continuing: %v", len(msgs), err)
+		log.Warning("Got %v messages along with error, continuing: %v", len(msgs), err)
 	}
 
-	bms, err := c.s.broadcastManager.MakeBroadcastMessagesForClient(ctx, info.ID, info.Labels)
-	if err != nil {
-		return nil, err
+	// If the client recently contacted us, the broadcast situation is unlikely to
+	// have changed, so we skip checking for broadcasts. To keep this from delaying
+	// broadcast distribution, the broadcast manager clears the client cache when it
+	// finds more broadcasts.
+	if !info.Cached {
+		bms, err := c.s.broadcastManager.MakeBroadcastMessagesForClient(ctx, info.ID, info.Labels)
+		if err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, bms...)
 	}
-	msgs = append(msgs, bms...)
 
 	if len(msgs) == 0 {
 		return msgs, nil
@@ -156,7 +179,30 @@ func (c commsContext) FindMessagesForClient(ctx context.Context, info *comms.Cli
 	return msgs, nil
 }
 
-func (c commsContext) validateMessageFromClient(id common.ClientID, m *fspb.Message, validationInfo string) error {
+func (c commsContext) MakeBlacklistMessage(ctx context.Context, info *comms.ClientInfo, contactID db.ContactID) (*fspb.Message, error) {
+	mid, err := common.RandomMessageID()
+	if err != nil {
+		return nil, fmt.Errorf("unable to create message id: %v", err)
+	}
+	msg := &fspb.Message{
+		MessageId: mid.Bytes(),
+		Source: &fspb.Address{
+			ServiceName: "system",
+		},
+		Destination: &fspb.Address{
+			ServiceName: "system",
+			ClientId:    info.ID.Bytes(),
+		},
+		MessageType:  "RekeyRequest",
+		CreationTime: db.NowProto(),
+	}
+	if err = c.s.dataStore.StoreMessages(ctx, []*fspb.Message{msg}, contactID); err != nil {
+		return nil, fmt.Errorf("unable to store RekeyRequest: %v", err)
+	}
+	return msg, nil
+}
+
+func (c commsContext) validateMessageFromClient(id common.ClientID, m *fspb.Message, validationInfo *fspb.ValidationInfo) error {
 	if m.Destination == nil {
 		return fmt.Errorf("message must have Destination")
 	}
@@ -176,21 +222,15 @@ func (c commsContext) validateMessageFromClient(id common.ClientID, m *fspb.Mess
 	return nil
 }
 
-// RecordClientContact records that a contact occurred. The resulting
-// ContactID is guaranteed to be unique.
-func (c commsContext) RecordClientContact(ctx context.Context, info *comms.ClientInfo, sentNonce, receivedNonce uint64, addr string) (db.ContactID, error) {
-	return c.s.dataStore.RecordClientContact(ctx, info.ID, sentNonce, receivedNonce, addr)
-}
-
 // handleMessagesFromClient processes a block of messages from a particular
 // client. It saves them to the database, associates them with the contact
 // identified by contactTime, and processes them.
-func (c commsContext) handleMessagesFromClient(ctx context.Context, info *comms.ClientInfo, contactID db.ContactID, received *fspb.ContactData, validationInfo string) error {
+func (c commsContext) handleMessagesFromClient(ctx context.Context, info *comms.ClientInfo, contactID db.ContactID, received *fspb.ContactData, validationInfo *fspb.ValidationInfo) error {
 	msgs := make([]*fspb.Message, 0, len(received.Messages))
 	for _, m := range received.Messages {
 		err := c.validateMessageFromClient(info.ID, m, validationInfo)
 		if err != nil {
-			log.Printf("Dropping invalid message from [%v]: %v", info.ID, err)
+			log.Errorf("Dropping invalid message from [%v]: %v", info.ID, err)
 			continue
 		}
 		msgs = append(msgs, m)

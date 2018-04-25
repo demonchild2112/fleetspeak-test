@@ -15,13 +15,13 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strconv"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/ptypes"
 
 	"github.com/google/fleetspeak/fleetspeak/src/common"
@@ -37,7 +37,6 @@ const (
 	bytesToMIB = 1.0 / float64(1<<20)
 )
 
-// ListClients implements db.ClientStore.
 func (d *Datastore) ListClients(ctx context.Context, ids []common.ClientID) ([]*spb.Client, error) {
 	d.l.Lock()
 	defer d.l.Unlock()
@@ -54,7 +53,9 @@ func (d *Datastore) ListClients(ctx context.Context, ids []common.ClientID) ([]*
 			var sid string
 			var timeNS int64
 			var addr sql.NullString
-			if err := rows.Scan(&sid, &timeNS, &addr); err != nil {
+			var clockSecs, clockNanos sql.NullInt64
+			var blacklisted bool
+			if err := rows.Scan(&sid, &timeNS, &addr, &clockSecs, &clockNanos, &blacklisted); err != nil {
 				return err
 			}
 
@@ -72,10 +73,19 @@ func (d *Datastore) ListClients(ctx context.Context, ids []common.ClientID) ([]*
 				addr.String = ""
 			}
 
+			var lastClock *tspb.Timestamp
+			if clockSecs.Valid && clockNanos.Valid {
+				lastClock = &tspb.Timestamp{
+					Seconds: clockSecs.Int64,
+					Nanos:   int32(clockNanos.Int64),
+				}
+			}
 			retm[sid] = &spb.Client{
 				ClientId:           id.Bytes(),
 				LastContactTime:    ts,
 				LastContactAddress: addr.String,
+				LastClock:          lastClock,
+				Blacklisted:        blacklisted,
 			}
 		}
 		return rows.Err()
@@ -83,12 +93,12 @@ func (d *Datastore) ListClients(ctx context.Context, ids []common.ClientID) ([]*
 
 	err := d.runInTx(func(tx *sql.Tx) error {
 		if len(ids) == 0 {
-			if err := h(tx.QueryContext(ctx, "SELECT client_id, last_contact_time, last_contact_address FROM clients")); err != nil {
+			if err := h(tx.QueryContext(ctx, "SELECT client_id, last_contact_time, last_contact_address, last_clock_seconds, last_clock_nanos, blacklisted FROM clients")); err != nil {
 				return err
 			}
 		} else {
 			for _, id := range ids {
-				if err := h(tx.QueryContext(ctx, "SELECT client_id, last_contact_time, last_contact_address FROM clients WHERE client_id = ?", id.String())); err != nil {
+				if err := h(tx.QueryContext(ctx, "SELECT client_id, last_contact_time, last_contact_address, last_clock_seconds, last_clock_nanos, blacklisted FROM clients WHERE client_id = ?", id.String())); err != nil {
 					return err
 				}
 			}
@@ -124,7 +134,6 @@ func (d *Datastore) ListClients(ctx context.Context, ids []common.ClientID) ([]*
 	return ret, err
 }
 
-// GetClientData implements db.ClientStore.
 func (d *Datastore) GetClientData(ctx context.Context, id common.ClientID) (*db.ClientData, error) {
 	d.l.Lock()
 	defer d.l.Unlock()
@@ -132,10 +141,10 @@ func (d *Datastore) GetClientData(ctx context.Context, id common.ClientID) (*db.
 	err := d.runInTx(func(tx *sql.Tx) error {
 		sid := id.String()
 
-		r := tx.QueryRowContext(ctx, "SELECT client_key FROM clients WHERE client_id=?", sid)
+		r := tx.QueryRowContext(ctx, "SELECT client_key, blacklisted FROM clients WHERE client_id=?", sid)
 		var c db.ClientData
 
-		err := r.Scan(&c.Key)
+		err := r.Scan(&c.Key, &c.Blacklisted)
 		if err != nil {
 			return err
 		}
@@ -162,13 +171,12 @@ func (d *Datastore) GetClientData(ctx context.Context, id common.ClientID) (*db.
 	return cd, err
 }
 
-// AddClient implements db.ClientStore.
 func (d *Datastore) AddClient(ctx context.Context, id common.ClientID, data *db.ClientData) error {
 	d.l.Lock()
 	defer d.l.Unlock()
 	return d.runInTx(func(tx *sql.Tx) error {
 		sid := id.String()
-		if _, err := tx.ExecContext(ctx, "INSERT INTO clients(client_id, client_key, last_contact_time) VALUES(?, ?, ?)", sid, data.Key, db.Now().UnixNano()); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO clients(client_id, client_key, blacklisted, last_contact_time) VALUES(?, ?, 0, ?)", sid, data.Key, db.Now().UnixNano()); err != nil {
 			return err
 		}
 		for _, l := range data.Labels {
@@ -180,7 +188,6 @@ func (d *Datastore) AddClient(ctx context.Context, id common.ClientID, data *db.
 	})
 }
 
-// AddClientLabel implements db.ClientStore.
 func (d *Datastore) AddClientLabel(ctx context.Context, id common.ClientID, l *fspb.Label) error {
 	d.l.Lock()
 	defer d.l.Unlock()
@@ -188,7 +195,6 @@ func (d *Datastore) AddClientLabel(ctx context.Context, id common.ClientID, l *f
 	return err
 }
 
-// RemoveClientLabel implements db.ClientStore.
 func (d *Datastore) RemoveClientLabel(ctx context.Context, id common.ClientID, l *fspb.Label) error {
 	d.l.Lock()
 	defer d.l.Unlock()
@@ -196,15 +202,20 @@ func (d *Datastore) RemoveClientLabel(ctx context.Context, id common.ClientID, l
 	return err
 }
 
-// RecordClientContact implements db.ClientStore.
-func (d *Datastore) RecordClientContact(ctx context.Context, cid common.ClientID, nonceSent, nonceReceived uint64, addr string) (db.ContactID, error) {
+func (d *Datastore) BlacklistClient(ctx context.Context, id common.ClientID) error {
+	_, err := d.db.ExecContext(ctx, "UPDATE clients SET blacklisted=1 WHERE client_id=?", id.String())
+	return err
+}
+
+func (d *Datastore) RecordClientContact(ctx context.Context, data db.ContactData) (db.ContactID, error) {
 	d.l.Lock()
 	defer d.l.Unlock()
+
 	var res db.ContactID
 	err := d.runInTx(func(tx *sql.Tx) error {
 		n := db.Now().UnixNano()
 		r, err := tx.ExecContext(ctx, "INSERT INTO client_contacts(client_id, time, sent_nonce, received_nonce, address) VALUES(?, ?, ?, ?, ?)",
-			cid.String(), n, nonceSent, nonceReceived, addr)
+			data.ClientID.String(), n, data.NonceSent, data.NonceReceived, data.Addr)
 		if err != nil {
 			return err
 		}
@@ -212,7 +223,12 @@ func (d *Datastore) RecordClientContact(ctx context.Context, cid common.ClientID
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE clients SET last_contact_time = ?, last_contact_address = ? WHERE client_id = ?", n, addr, cid.String()); err != nil {
+		var lcs, lcn sql.NullInt64
+		if data.ClientClock != nil {
+			lcs.Int64, lcs.Valid = data.ClientClock.Seconds, true
+			lcn.Int64, lcn.Valid = int64(data.ClientClock.Nanos), true
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE clients SET last_contact_time = ?, last_contact_address = ?, last_clock_seconds = ?, last_clock_nanos = ? WHERE client_id = ?", n, data.Addr, lcs, lcn, data.ClientID.String()); err != nil {
 			return err
 		}
 		res = db.ContactID(strconv.FormatUint(uint64(id), 16))
@@ -221,12 +237,50 @@ func (d *Datastore) RecordClientContact(ctx context.Context, cid common.ClientID
 	return res, err
 }
 
-// LinkMessagesToContact implements db.ClientStore.
+func (d *Datastore) ListClientContacts(ctx context.Context, id common.ClientID) ([]*spb.ClientContact, error) {
+	var res []*spb.ClientContact
+	if err := d.runInTx(func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(
+			ctx,
+			"SELECT time, sent_nonce, received_nonce, address FROM client_contacts WHERE client_id = ?",
+			id.String())
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var addr sql.NullString
+			var timeNS int64
+			c := &spb.ClientContact{}
+			if err := rows.Scan(&timeNS, &c.SentNonce, &c.ReceivedNonce, &addr); err != nil {
+				return err
+			}
+
+			if addr.Valid {
+				c.ObservedAddress = addr.String
+			}
+
+			ts, err := ptypes.TimestampProto(time.Unix(0, timeNS))
+			if err != nil {
+				return err
+			}
+			c.Timestamp = ts
+
+			res = append(res, c)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
 func (d *Datastore) LinkMessagesToContact(ctx context.Context, contact db.ContactID, ids []common.MessageID) error {
 	c, err := strconv.ParseUint(string(contact), 16, 64)
 	if err != nil {
 		e := fmt.Errorf("unable to parse ContactID [%v]: %v", contact, err)
-		log.Print(e)
+		log.Error(e)
 		return e
 	}
 	d.l.Lock()
@@ -241,7 +295,6 @@ func (d *Datastore) LinkMessagesToContact(ctx context.Context, contact db.Contac
 	})
 }
 
-// RecordResourceUsageData implements db.ClientStore.
 func (d *Datastore) RecordResourceUsageData(ctx context.Context, id common.ClientID, rud mpb.ResourceUsageData) error {
 	d.l.Lock()
 	defer d.l.Unlock()
@@ -273,7 +326,6 @@ func (d *Datastore) RecordResourceUsageData(ctx context.Context, id common.Clien
 	})
 }
 
-// FetchResourceUsageRecords implements db.ClientStore.
 func (d *Datastore) FetchResourceUsageRecords(ctx context.Context, id common.ClientID, limit int) ([]*spb.ClientResourceUsageRecord, error) {
 	var records []*spb.ClientResourceUsageRecord
 	err := d.runInTx(func(tx *sql.Tx) error {

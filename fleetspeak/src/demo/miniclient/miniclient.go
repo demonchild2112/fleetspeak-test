@@ -30,10 +30,12 @@ import (
 	"io/ioutil"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 
 	"flag"
-	"log"
+
+	log "github.com/golang/glog"
 
 	"github.com/google/fleetspeak/fleetspeak/src/client"
 	"github.com/google/fleetspeak/fleetspeak/src/client/config"
@@ -55,6 +57,11 @@ var (
 func main() {
 	flag.Parse()
 
+	ph, err := config.NewFilesystemPersistenceHandler(*configPath, filepath.Join(*configPath, "writeback"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	cl, err := client.New(
 		config.Configuration{
 			TrustedCerts:         readTrustedCerts(),
@@ -65,7 +72,7 @@ func main() {
 				{ServiceName: "client", Label: runtime.GOOS},
 				{ServiceName: "client", Label: "miniclient"},
 			},
-			ConfigurationPath: *configPath,
+			PersistenceHandler: ph,
 		},
 		client.Components{
 			ServiceFactories: map[string]service.Factory{
@@ -77,7 +84,7 @@ func main() {
 			Communicator: &https.Communicator{},
 		})
 	if err != nil {
-		log.Fatalf("Unable to create client: %v", err)
+		log.Exitf("Unable to create client: %v", err)
 	}
 
 	s := make(chan os.Signal)
@@ -90,11 +97,11 @@ func main() {
 func readTrustedCerts() *x509.CertPool {
 	b, err := ioutil.ReadFile(*trustedCertFile)
 	if err != nil {
-		log.Fatalf("Unable to read trusted_cert_file [%s]: %v", *trustedCertFile, err)
+		log.Exitf("Unable to read trusted_cert_file [%s]: %v", *trustedCertFile, err)
 	}
 	p := x509.NewCertPool()
 	if !p.AppendCertsFromPEM(b) {
-		log.Fatalf("No certs found in trusted_cert_file [%s]", *trustedCertFile)
+		log.Exitf("No certs found in trusted_cert_file [%s]", *trustedCertFile)
 	}
 	return p
 }
@@ -102,7 +109,7 @@ func readTrustedCerts() *x509.CertPool {
 func readDeploymentKeys() []rsa.PublicKey {
 	b, err := ioutil.ReadFile(*deploymentKeyFile)
 	if err != nil {
-		log.Fatalf("Unable to read deployment_key_file [%s]: %v", *deploymentKeyFile, err)
+		log.Exitf("Unable to read deployment_key_file [%s]: %v", *deploymentKeyFile, err)
 	}
 	var ks []rsa.PublicKey
 	for {
@@ -112,15 +119,15 @@ func readDeploymentKeys() []rsa.PublicKey {
 			break
 		}
 		if p.Type != "PUBLIC KEY" {
-			log.Fatalf("Unexpected PEM type [%s] in [%s], expected [PUBLIC KEY]", p.Type, *deploymentKeyFile)
+			log.Exitf("Unexpected PEM type [%s] in [%s], expected [PUBLIC KEY]", p.Type, *deploymentKeyFile)
 		}
 		k, err := x509.ParsePKIXPublicKey(p.Bytes)
 		if err != nil {
-			log.Fatalf("Error parsing public key in [%s]: %v", *deploymentKeyFile, err)
+			log.Exitf("Error parsing public key in [%s]: %v", *deploymentKeyFile, err)
 		}
 		key, ok := k.(*rsa.PublicKey)
 		if !ok {
-			log.Fatalf("Expected [*rsa.PublicKey] for deployment public key, got [%T]", k)
+			log.Exitf("Expected [*rsa.PublicKey] for deployment public key, got [%T]", k)
 		}
 		ks = append(ks, *key)
 	}

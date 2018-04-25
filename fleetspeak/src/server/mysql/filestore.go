@@ -16,17 +16,15 @@ package mysql
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"io"
 	"io/ioutil"
 	"time"
 
-	"context"
-
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
 )
 
-// StoreFile implements db.FileStore.
 func (d *Datastore) StoreFile(ctx context.Context, service, name string, data io.Reader) error {
 	b, err := ioutil.ReadAll(data)
 	if err != nil {
@@ -39,7 +37,6 @@ func (d *Datastore) StoreFile(ctx context.Context, service, name string, data io
 	})
 }
 
-// StatFile implements db.FileStore.
 func (d *Datastore) StatFile(ctx context.Context, service, name string) (time.Time, error) {
 	var ts int64
 
@@ -51,7 +48,6 @@ func (d *Datastore) StatFile(ctx context.Context, service, name string) (time.Ti
 	return time.Unix(0, ts).UTC(), err
 }
 
-// ReadFile implements db.FileStore.
 func (d *Datastore) ReadFile(ctx context.Context, service, name string) (data db.ReadSeekerCloser, modtime time.Time, err error) {
 	var b []byte
 	var ts int64

@@ -17,7 +17,44 @@ message Config {
   // Forced to true when inactivity timeout is set.
   bool lazy_start = 3;
 
-  // By default, daemon services report resource usage every minute. This
+  // By default, daemon services report resource usage every 10 minutes. This
   // flag disables this if set.
   bool disable_resource_monitoring = 4;
+
+  // How many samples to aggregate into a report when monitoring resource usage.
+  // If unset, defaults to 20.
+  int32 resource_monitoring_sample_size = 5;
+
+  // How long to wait between resource monitoring samples. If unset, defaults to
+  // 30.
+  int32 resource_monitoring_sample_period_seconds = 6;
+
+  // If set, Fleetspeak will kill and restart the child if it exceeds this
+  // memory limit, in bytes.
+  int64 memory_limit = 7;
+
+  // If set, Fleetspeak will monitor child's heartbeat messages and kill
+  // unresponsive processes. The values below should be set to configure the
+  // heartbeat monitoring.
+  bool monitor_heartbeats = 8;
+
+  // How long to wait for initial heartbeat.
+  int32 heartbeat_unresponsive_grace_period_seconds = 9;
+
+  // How long to wait for subsequent heartbeats.
+  int32 heartbeat_unresponsive_kill_period_seconds = 10;
+
+  // If set, we forward stderr and stdout data to the server as messages with:
+  //
+  // message_type="StdOutput"
+  // data=<fleetspeak.daemonservice.StdOutputData>
+  message StdParams {
+    string service_name = 1; // Service on the server to forward to. Required.
+
+    // A message will be sent when we have flush_bytes queued, or when we
+    // have bytes flush_time_seconds old.
+    int32 flush_bytes = 2; // Default and maximum value is 1MB.
+    int32 flush_time_seconds = 3; // Default is 60.
+  }
+  StdParams std_params = 11;
 }

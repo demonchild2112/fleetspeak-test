@@ -17,12 +17,12 @@
 package daemonservice
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/google/fleetspeak/fleetspeak/src/client/daemonservice/execution"
 	"github.com/google/fleetspeak/fleetspeak/src/client/service"
@@ -120,7 +120,7 @@ func (s *Service) newExec(lastStart time.Time) *execution.Execution {
 			return exec
 		}
 		lastStart = time.Now()
-		log.Printf("Execution of service [%s] failed, retrying: %v", s.name, err)
+		log.Errorf("Execution of service [%s] failed, retrying: %v", s.name, err)
 	}
 }
 
@@ -135,7 +135,7 @@ func (s *Service) monitorExecution(e *execution.Execution) {
 		}
 		select {
 		case <-e.Done:
-			log.Printf("Execution of [%s] ended spontaneously.", s.name)
+			log.Warningf("Execution of [%s] ended spontaneously.", s.name)
 			return
 		case <-s.stop:
 			return
@@ -184,8 +184,8 @@ func (s *Service) feedExecution(msg *fspb.Message, e *execution.Execution) (bool
 func (s *Service) executionManagerLoop() {
 	defer s.routines.Done()
 	var lastStart time.Time
+	var msg *fspb.Message
 	for {
-		var msg *fspb.Message
 		if s.cfg.LazyStart {
 			select {
 			case <-s.stop:

@@ -15,10 +15,9 @@
 package server
 
 import (
+	"context"
 	"io"
 	"time"
-
-	"context"
 
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
@@ -33,7 +32,7 @@ import (
 
 type noopStatsCollector struct{}
 
-func (s noopStatsCollector) MessageIngested(service, messageType string, backlogged bool, payloadBytes int) {
+func (s noopStatsCollector) MessageIngested(backlogged bool, m *fspb.Message) {
 }
 
 func (s noopStatsCollector) MessageSaved(service, messageType string, forClient bool, savedPayloadBytes int) {
@@ -54,7 +53,7 @@ func (s noopStatsCollector) ClientPoll(info stats.PollInfo) {
 func (s noopStatsCollector) DatastoreOperation(start, end time.Time, operation string, result error) {
 }
 
-func (s noopStatsCollector) ResourceUsageDataReceived(rud mpb.ResourceUsageData) {
+func (s noopStatsCollector) ResourceUsageDataReceived(cd *db.ClientData, rud mpb.ResourceUsageData, v *fspb.ValidationInfo) {
 }
 
 // A MonitoredDatastore wraps a base Datastore and collects statistics about all
@@ -85,10 +84,17 @@ func (d MonitoredDatastore) GetMessages(ctx context.Context, ids []common.Messag
 	return res, err
 }
 
+func (d MonitoredDatastore) SetMessageResult(ctx context.Context, dest common.ClientID, id common.MessageID, res *fspb.MessageResult) error {
+	s := ftime.Now()
+	err := d.D.SetMessageResult(ctx, dest, id, res)
+	d.C.DatastoreOperation(s, ftime.Now(), "SetMessageResult", err)
+	return err
+}
+
 func (d MonitoredDatastore) GetMessageResult(ctx context.Context, id common.MessageID) (*fspb.MessageResult, error) {
 	s := ftime.Now()
 	res, err := d.D.GetMessageResult(ctx, id)
-	d.C.DatastoreOperation(s, ftime.Now(), "GetMessageStatus", err)
+	d.C.DatastoreOperation(s, ftime.Now(), "GetMessageResult", err)
 	return res, err
 }
 
@@ -102,7 +108,11 @@ func (d MonitoredDatastore) ListClients(ctx context.Context, ids []common.Client
 func (d MonitoredDatastore) GetClientData(ctx context.Context, id common.ClientID) (*db.ClientData, error) {
 	s := ftime.Now()
 	res, err := d.D.GetClientData(ctx, id)
-	d.C.DatastoreOperation(s, ftime.Now(), "GetClientData", err)
+	e := err
+	if e != nil && d.D.IsNotFound(e) {
+		e = nil
+	}
+	d.C.DatastoreOperation(s, ftime.Now(), "GetClientData", e)
 	return res, err
 }
 
@@ -127,10 +137,24 @@ func (d MonitoredDatastore) RemoveClientLabel(ctx context.Context, id common.Cli
 	return err
 }
 
-func (d MonitoredDatastore) RecordClientContact(ctx context.Context, id common.ClientID, nonceSent, nonceReceived uint64, addr string) (db.ContactID, error) {
+func (d MonitoredDatastore) BlacklistClient(ctx context.Context, id common.ClientID) error {
 	s := ftime.Now()
-	res, err := d.D.RecordClientContact(ctx, id, nonceSent, nonceReceived, addr)
+	err := d.D.BlacklistClient(ctx, id)
+	d.C.DatastoreOperation(s, ftime.Now(), "BlacklistClient", err)
+	return err
+}
+
+func (d MonitoredDatastore) RecordClientContact(ctx context.Context, data db.ContactData) (db.ContactID, error) {
+	s := ftime.Now()
+	res, err := d.D.RecordClientContact(ctx, data)
 	d.C.DatastoreOperation(s, ftime.Now(), "RecordClientContact", err)
+	return res, err
+}
+
+func (d MonitoredDatastore) ListClientContacts(ctx context.Context, id common.ClientID) ([]*spb.ClientContact, error) {
+	s := ftime.Now()
+	res, err := d.D.ListClientContacts(ctx, id)
+	d.C.DatastoreOperation(s, ftime.Now(), "ListClientContacts", err)
 	return res, err
 }
 

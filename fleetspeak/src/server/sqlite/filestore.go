@@ -16,17 +16,15 @@ package sqlite
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"io"
 	"io/ioutil"
 	"time"
 
-	"context"
-
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
 )
 
-// StoreFile implements db.FileStore.
 func (d *Datastore) StoreFile(ctx context.Context, service, name string, data io.Reader) error {
 	b, err := ioutil.ReadAll(data)
 	if err != nil {
@@ -41,7 +39,6 @@ func (d *Datastore) StoreFile(ctx context.Context, service, name string, data io
 	})
 }
 
-// StatFile implements db.FileStore.
 func (d *Datastore) StatFile(ctx context.Context, service, name string) (time.Time, error) {
 	d.l.Lock()
 	defer d.l.Unlock()
@@ -50,16 +47,12 @@ func (d *Datastore) StatFile(ctx context.Context, service, name string) (time.Ti
 
 	err := d.runInTx(func(tx *sql.Tx) error {
 		row := tx.QueryRowContext(ctx, "SELECT modified_time_nanos FROM files WHERE service = ? AND name = ?", service, name)
-		if err := row.Scan(&ts); err != nil {
-			return err
-		}
-		return nil
+		return row.Scan(&ts)
 	})
 
 	return time.Unix(0, ts).UTC(), err
 }
 
-// ReadFile implements db.FileStore.
 func (d *Datastore) ReadFile(ctx context.Context, service, name string) (data db.ReadSeekerCloser, modtime time.Time, err error) {
 	d.l.Lock()
 	defer d.l.Unlock()

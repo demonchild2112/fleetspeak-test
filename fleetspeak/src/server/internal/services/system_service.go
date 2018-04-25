@@ -15,16 +15,17 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/ptypes"
 
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
+	"github.com/google/fleetspeak/fleetspeak/src/server/internal/cache"
 	"github.com/google/fleetspeak/fleetspeak/src/server/service"
 	"github.com/google/fleetspeak/fleetspeak/src/server/stats"
 
@@ -45,6 +46,7 @@ type systemService struct {
 	stats     stats.Collector
 	datastore db.Store
 	w         sync.WaitGroup
+	cc        *cache.Clients
 }
 
 func (s *systemService) Start(sctx service.Context) error {
@@ -78,7 +80,7 @@ func (s *systemService) ProcessMessage(ctx context.Context, m *fspb.Message) err
 	case "ClientInfo":
 		return s.processClientInfo(ctx, cid, m.Data)
 	case "ResourceUsage":
-		return s.processResourceUsage(ctx, cid, m.Data)
+		return s.processResourceUsage(ctx, cid, m.Data, m.ValidationInfo)
 	default:
 	}
 
@@ -103,30 +105,34 @@ func (s *systemService) processMessageAck(ctx context.Context, mid common.Messag
 
 	msgs, err := s.datastore.GetMessages(ctx, ids, false)
 	if err != nil {
-		return service.TemporaryError{fmt.Errorf("unable to retrieve messages to ack: %v", err)}
+		return service.TemporaryError{E: fmt.Errorf("unable to retrieve messages to ack: %v", err)}
 	}
 
 	for _, msg := range msgs {
 		if msg.Result == nil {
 			mmid, err := common.BytesToMessageID(msg.MessageId)
 			if err != nil {
-				log.Printf("%v: retrieved message with bad message id[%v]: %v", mid, msg.MessageId, err)
+				log.Errorf("%v: retrieved message with bad message id[%v]: %v", mid, msg.MessageId, err)
 				continue
 			}
 			mcid, err := common.BytesToClientID(msg.Destination.ClientId)
 			if err != nil {
-				log.Printf("%v: retrieved message[%v] with bad client id[%v]: %v", mid, mmid, msg.Destination.ClientId, err)
+				log.Errorf("%v: retrieved message[%v] with bad client id[%v]: %v", mid, mmid, msg.Destination.ClientId, err)
 				continue
 			}
 			if cid != mcid {
-				log.Printf("%v: attempt by client [%v] to ack a message meant for client [%v]", mid, cid, mcid)
-				continue
+				if msg.Source != nil && msg.Source.ServiceName == "system" && msg.MessageType == "RekeyRequest" {
+					// RekeyRequests are special - they are acked by the new client ID. Since
+					// the mcid is a random number, we'll assume that this client really did
+					// receive the RekeyRequest under its previous id.
+					log.Infof("%v: client [%v] acked RekeyRequest sent to [%v] - rekey complete.", mid, cid, mcid)
+				} else {
+					log.Errorf("%v: attempt by client [%v] to ack a message meant for client [%v]", mid, cid, mcid)
+					continue
+				}
 			}
-			if err := s.datastore.StoreMessages(ctx, []*fspb.Message{
-				{MessageId: mmid.Bytes(),
-					Result: &fspb.MessageResult{ProcessedTime: db.NowProto()}},
-			}, ""); err != nil {
-				log.Printf("%v: unable to mark message [%v] processed: %v", mid, mmid, err)
+			if err := s.datastore.SetMessageResult(ctx, mcid, mmid, &fspb.MessageResult{ProcessedTime: db.NowProto()}); err != nil {
+				log.Errorf("%v: unable to mark message [%v] processed: %v", mid, mmid, err)
 			}
 		}
 	}
@@ -147,7 +153,7 @@ func (s *systemService) processMessageError(ctx context.Context, cid common.Clie
 
 	msgs, err := s.datastore.GetMessages(ctx, []common.MessageID{id}, false)
 	if err != nil {
-		return service.TemporaryError{fmt.Errorf("error from GetMessage([]{%v}): %v", id, err)}
+		return service.TemporaryError{E: fmt.Errorf("error from GetMessage([]{%v}): %v", id, err)}
 	}
 	if len(msgs) != 1 {
 		return fmt.Errorf("expected one result from GetMessages, got %v", len(msgs))
@@ -160,15 +166,13 @@ func (s *systemService) processMessageError(ctx context.Context, cid common.Clie
 	if mcid != cid {
 		return fmt.Errorf("attempt by client [%v] to ack a message meant for client [%v]", cid, mcid)
 	}
-	if err := s.datastore.StoreMessages(ctx, []*fspb.Message{
-		{MessageId: id.Bytes(),
-			Result: &fspb.MessageResult{
-				ProcessedTime: db.NowProto(),
-				Failed:        true,
-				FailedReason:  data.Error,
-			}},
-	}, ""); err != nil {
-		return service.TemporaryError{fmt.Errorf("unable to mark message [%v] as failed: %v", id, err)}
+	if err := s.datastore.SetMessageResult(ctx, mcid, id,
+		&fspb.MessageResult{
+			ProcessedTime: db.NowProto(),
+			Failed:        true,
+			FailedReason:  data.Error,
+		}); err != nil {
+		return service.TemporaryError{E: fmt.Errorf("unable to mark message [%v] as failed: %v", id, err)}
 	}
 	return nil
 }
@@ -181,14 +185,14 @@ func (s *systemService) processClientInfo(ctx context.Context, cid common.Client
 	}
 	cd, err := s.datastore.GetClientData(ctx, cid)
 	if err != nil {
-		return service.TemporaryError{fmt.Errorf("GetClientData(%v) failed: %v", cid, err)}
+		return service.TemporaryError{E: fmt.Errorf("GetClientData(%v) failed: %v", cid, err)}
 	}
 
 	// We create a set of the new client labels.
 	nl := make(map[string]bool)
 	for _, l := range data.Labels {
 		if l.ServiceName != clientServiceName {
-			log.Printf("attempt to set non-client label: %v", l)
+			log.Errorf("attempt to set non-client label: %v", l)
 			continue
 		}
 		nl[l.Label] = true
@@ -200,7 +204,7 @@ func (s *systemService) processClientInfo(ctx context.Context, cid common.Client
 		if l.ServiceName == clientServiceName {
 			if !nl[l.Label] {
 				if err = s.datastore.RemoveClientLabel(ctx, cid, l); err != nil {
-					return service.TemporaryError{fmt.Errorf("unable to remove label[%v]: %v", l, err)}
+					return service.TemporaryError{E: fmt.Errorf("unable to remove label[%v]: %v", l, err)}
 				}
 			} else {
 				ol[l.Label] = true
@@ -215,20 +219,29 @@ func (s *systemService) processClientInfo(ctx context.Context, cid common.Client
 		}
 		if !ol[l.Label] {
 			if err = s.datastore.AddClientLabel(ctx, cid, l); err != nil {
-				return service.TemporaryError{fmt.Errorf("unable to add label[%v]: %v", l, err)}
+				return service.TemporaryError{E: fmt.Errorf("unable to add label[%v]: %v", l, err)}
 			}
 		}
 	}
+	// Forget anything we know about this client. Other servers could have
+	// now-stale data, but this client is likely to stick with us due to
+	// connection reuse.
+	s.cc.Update(cid, nil)
 	return nil
 }
 
 // processResourceUsage processes a ResourceUsageData message.
-func (s *systemService) processResourceUsage(ctx context.Context, cid common.ClientID, d *apb.Any) error {
+func (s *systemService) processResourceUsage(ctx context.Context, cid common.ClientID, d *apb.Any, v *fspb.ValidationInfo) error {
 	var rud mpb.ResourceUsageData
 	if err := ptypes.UnmarshalAny(d, &rud); err != nil {
 		return fmt.Errorf("unable to unmarshal data as ResourceUsageData: %v", err)
 	}
-	s.stats.ResourceUsageDataReceived(rud)
+
+	cd, err := s.sctx.GetClientData(ctx, cid)
+	if err != nil {
+		log.Errorf("Failed to get client data for %v: %v", cid, err)
+	}
+	s.stats.ResourceUsageDataReceived(cd, rud, v)
 	if err := s.datastore.RecordResourceUsageData(ctx, cid, rud); err != nil {
 		err = fmt.Errorf("failed to write resource-usage data: %v", err)
 		return err

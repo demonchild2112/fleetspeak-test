@@ -38,11 +38,13 @@ type Communicator interface {
 	Stop()               // Tells the communicator to stop sending and receiving messages.
 }
 
-// A ClientInfo is the basic infomation that we have about a client.
+// A ClientInfo is the basic information that we have about a client.
 type ClientInfo struct {
-	ID     common.ClientID
-	Key    crypto.PublicKey
-	Labels []*fspb.Label
+	ID          common.ClientID
+	Key         crypto.PublicKey
+	Labels      []*fspb.Label
+	Blacklisted bool
+	Cached      bool // Whether the data was retrieved from a cache.
 }
 
 // A Context defines the view of the Fleetspeak server provided to a Communicator.

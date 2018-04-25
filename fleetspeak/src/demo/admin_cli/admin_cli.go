@@ -15,23 +15,20 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
 	"os"
-	"sort"
-	"strings"
-	"time"
 
-	"flag"
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/ptypes"
 	"google.golang.org/grpc"
 
+	"github.com/google/fleetspeak/fleetspeak/src/admin/cli"
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 
 	sspb "github.com/google/fleetspeak/fleetspeak/src/client/stdinservice/proto/fleetspeak_stdinservice"
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
-	spb "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
 	sgrpc "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
 )
 
@@ -41,6 +38,7 @@ func usage() {
 	fmt.Fprint(os.Stderr,
 		"Usage:\n"+
 			"    admin_cli listclients\n"+
+			"    admin_cli listcontacts <client_id> [limit]\n"+
 			"    admin_cli ls <client_id> path...\n"+
 			"    admin_cli cat <client_id> path...\n"+
 			"\n"+
@@ -58,67 +56,23 @@ func main() {
 
 	conn, err := grpc.Dial(*adminAddr, grpc.WithInsecure(), grpc.WithBlock())
 	if err != nil {
-		log.Fatalf("Unable to connect to fleetspeak admin interface [%v]: %v", *adminAddr, err)
+		log.Exitf("Unable to connect to fleetspeak admin interface [%v]: %v", *adminAddr, err)
 	}
 	admin := sgrpc.NewAdminClient(conn)
 
 	switch flag.Arg(0) {
 	case "listclients":
-		if flag.NArg() != 1 {
-			fmt.Fprint(os.Stderr, "listclients takes no parameters.\n")
-			usage()
-			os.Exit(1)
-		}
-		listClients(admin)
+		cli.ListClients(admin, flag.Args()[1:]...)
+	case "listcontacts":
+		cli.ListContacts(admin, flag.Args()[1:]...)
 	case "ls":
 		startStdin(admin, "lsService", flag.Args()[1:]...)
 	case "cat":
 		startStdin(admin, "catService", flag.Args()[1:]...)
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %v\n", flag.Arg(1))
+		fmt.Fprintf(os.Stderr, "Unknown command: %v\n", flag.Arg(0))
 		usage()
 		os.Exit(1)
-	}
-}
-
-func contactTime(c *spb.Client) time.Time {
-	return time.Unix(c.LastContactTime.Seconds, int64(c.LastContactTime.Nanos))
-}
-
-// byContactTime adapts []*spb.Client for use by sort.Sort.
-type byContactTime []*spb.Client
-
-func (b byContactTime) Len() int           { return len(b) }
-func (b byContactTime) Swap(i, j int)      { b[i], b[j] = b[j], b[i] }
-func (b byContactTime) Less(i, j int) bool { return contactTime(b[i]).Before(contactTime(b[j])) }
-
-func listClients(c sgrpc.AdminClient) {
-	ctx := context.Background()
-	res, err := c.ListClients(ctx, &spb.ListClientsRequest{})
-	if err != nil {
-		log.Fatalf("ListClients RPC failed: %v", err)
-	}
-	if len(res.Clients) == 0 {
-		fmt.Println("No clients found.")
-		return
-	}
-	sort.Sort(byContactTime(res.Clients))
-	fmt.Printf("%-16s %-23s %s\n", "Client ID:", "Last Seen:", "Labels:")
-	for _, cl := range res.Clients {
-		id, err := common.BytesToClientID(cl.ClientId)
-		if err != nil {
-			log.Printf("Ignoring invalid client id [%v], %v", cl.ClientId, err)
-			continue
-		}
-		var ls []string
-		for _, l := range cl.Labels {
-			ls = append(ls, l.ServiceName+":"+l.Label)
-		}
-		ts, err := ptypes.Timestamp(cl.LastContactTime)
-		if err != nil {
-			log.Printf("Unable to parse last contact time for %v: %v", id, err)
-		}
-		fmt.Printf("%v %v [%v]\n", id, ts.Format("15:04:05.000 2006.01.02"), strings.Join(ls, ","))
 	}
 }
 
@@ -129,7 +83,7 @@ func startStdin(c sgrpc.AdminClient, service string, args ...string) {
 	}
 	id, err := common.StringToClientID(args[0])
 	if err != nil {
-		log.Fatalf("Unable to parse %v as client id: %v", flag.Arg(1), err)
+		log.Exitf("Unable to parse %v as client id: %v", flag.Arg(1), err)
 	}
 
 	ctx := context.Background()
@@ -141,10 +95,10 @@ func startStdin(c sgrpc.AdminClient, service string, args ...string) {
 	}
 	m.Data, err = ptypes.MarshalAny(&im)
 	if err != nil {
-		log.Fatalf("Unable to marshal StdinServiceInputMessage as Any: %v", err)
+		log.Exitf("Unable to marshal StdinServiceInputMessage as Any: %v", err)
 	}
 	_, err = c.InsertMessage(ctx, &m)
 	if err != nil {
-		log.Printf("InsertMessage RPC failed: %v", err)
+		log.Errorf("InsertMessage RPC failed: %v", err)
 	}
 }

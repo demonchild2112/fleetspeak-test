@@ -27,7 +27,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"log"
+	log "github.com/golang/glog"
 	"github.com/google/fleetspeak/fleetspeak/src/client/signer"
 	"github.com/google/fleetspeak/fleetspeak/src/server/authorizer"
 
@@ -43,13 +43,13 @@ type testAuthorizer struct {
 	expectType  map[int64]x509.SignatureAlgorithm
 }
 
-func (a *testAuthorizer) Allow4(_ net.Addr, _ authorizer.ContactInfo, _ authorizer.ClientInfo, sigs []authorizer.SignatureInfo) (accept bool, validationInfo string) {
+func (a *testAuthorizer) Allow4(_ net.Addr, _ authorizer.ContactInfo, _ authorizer.ClientInfo, sigs []authorizer.SignatureInfo) (accept bool, validationInfo *fspb.ValidationInfo) {
 	atomic.AddInt64(&a.authCount, 1)
 	if len(sigs) != a.expectCount {
 		a.t.Errorf("expected %d sigs, got %d", a.expectCount, len(sigs))
 	}
 	for _, s := range sigs {
-		serial := s.Certificate.SerialNumber.Int64()
+		serial := s.Certificate[0].SerialNumber.Int64()
 		if a.expectType[serial] != s.Algorithm {
 			a.t.Errorf("Expected %v to have signature of type %v, got %v", serial, a.expectType[serial], s.Algorithm)
 		}
@@ -57,7 +57,7 @@ func (a *testAuthorizer) Allow4(_ net.Addr, _ authorizer.ContactInfo, _ authoriz
 			a.t.Errorf("Expected %v to have valid=%t got valid=%t", serial, a.expectValid[serial], s.Valid)
 		}
 	}
-	return true, "Authorized!"
+	return true, &fspb.ValidationInfo{Tags: map[string]string{"result": "Valid"}}
 }
 
 type testSigner struct {
@@ -74,10 +74,10 @@ func (s *testSigner) SignContact(data []byte) *fspb.Signature {
 	hashed := h.Sum(nil)
 	sig, err := s.signer.Sign(rand.Reader, hashed, s.hash)
 	if err != nil {
-		log.Fatalf("Unable to sign hashed of length %d with (%v): %v", len(hashed), s.hash, err)
+		log.Exitf("Unable to sign hashed of length %d with (%v): %v", len(hashed), s.hash, err)
 	}
 	return &fspb.Signature{
-		Certificate: s.cert.Raw,
+		Certificate: [][]byte{s.cert.Raw},
 		Algorithm:   int32(s.alg),
 		Signature:   sig,
 	}

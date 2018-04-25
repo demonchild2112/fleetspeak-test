@@ -19,12 +19,12 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	"io/ioutil"
+	"path/filepath"
 	"testing"
 
-	"log"
 	"github.com/google/fleetspeak/fleetspeak/src/client/config"
 	"github.com/google/fleetspeak/fleetspeak/src/common"
+	"github.com/google/fleetspeak/fleetspeak/src/comtesting"
 
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
 )
@@ -32,7 +32,6 @@ import (
 func TestRekey(t *testing.T) {
 
 	m, err := StartManager(&config.Configuration{
-		Ephemeral:     true,
 		FixedServices: make([]*fspb.ClientServiceConfig, 0),
 	}, make(chan *fspb.ClientInfoData))
 	if err != nil {
@@ -45,7 +44,7 @@ func TestRekey(t *testing.T) {
 	if (id1 == common.ClientID{}) {
 		t.Errorf("new config manager should provide non-trivial ClientID")
 	}
-	if err := m.rekey(); err != nil {
+	if err := m.Rekey(); err != nil {
 		t.Errorf("unable to rekey: %v", err)
 	}
 	id2 := m.ClientID()
@@ -55,14 +54,16 @@ func TestRekey(t *testing.T) {
 }
 
 func TestWriteback(t *testing.T) {
-	d, err := ioutil.TempDir("", "TestWriteback_")
+	tmpPath, fin := comtesting.GetTempDir("TestWriteback")
+	defer fin()
+
+	ph, err := config.NewFilesystemPersistenceHandler(tmpPath, filepath.Join(tmpPath, "writeback"))
 	if err != nil {
-		t.Fatalf("unable to create temp directory: %v", err)
+		t.Fatal(err)
 	}
-	log.Printf("Create temp directory: %v", d)
 
 	m1, err := StartManager(&config.Configuration{
-		ConfigurationPath: d,
+		PersistenceHandler: ph,
 	}, make(chan *fspb.ClientInfoData))
 	if err != nil {
 		t.Errorf("unable to create config manager: %v", err)
@@ -74,8 +75,13 @@ func TestWriteback(t *testing.T) {
 	}
 	m1.Stop()
 
+	ph, err = config.NewFilesystemPersistenceHandler(tmpPath, filepath.Join(tmpPath, "writeback"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	m2, err := StartManager(&config.Configuration{
-		ConfigurationPath: d,
+		PersistenceHandler: ph,
 	}, make(chan *fspb.ClientInfoData))
 	if err != nil {
 		t.Errorf("Unable to create new config manager: %v", err)
@@ -104,7 +110,6 @@ func TestValidateServiceConfig(t *testing.T) {
 	m, err := StartManager(
 		&config.Configuration{
 			DeploymentPublicKeys: []rsa.PublicKey{k1.PublicKey, k2.PublicKey},
-			Ephemeral:            true,
 			FixedServices:        make([]*fspb.ClientServiceConfig, 0),
 		}, make(chan *fspb.ClientInfoData))
 

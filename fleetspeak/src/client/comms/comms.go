@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package comms defines the interface between the Fleetspeak client base libary and the
-// Communicator component used to talk to the server.
+// Package comms defines the interface between the Fleetspeak client base
+// library and the Communicator component used to talk to the server.
 package comms
 
 import (
@@ -90,7 +90,10 @@ type Context interface {
 	// of the chain has been revoked.
 	ChainRevoked(chains []*x509.Certificate) bool
 
-	// CurrentIdentity returns the client's current identifying information.
+	// CurrentID returns the current client id.
+	CurrentID() common.ClientID
+
+	// CurrentIdentity returns the client's full identifying information.
 	CurrentIdentity() (ClientIdentity, error)
 
 	// ServerInfo returns the servers that the client should attempt to

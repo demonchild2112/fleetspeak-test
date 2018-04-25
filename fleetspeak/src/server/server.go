@@ -16,15 +16,17 @@
 package server
 
 import (
+	"context"
 	"sync"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
+
 	"github.com/google/fleetspeak/fleetspeak/src/server/authorizer"
 	"github.com/google/fleetspeak/fleetspeak/src/server/comms"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
 	"github.com/google/fleetspeak/fleetspeak/src/server/internal/broadcasts"
+	"github.com/google/fleetspeak/fleetspeak/src/server/internal/cache"
 	"github.com/google/fleetspeak/fleetspeak/src/server/internal/services"
 	"github.com/google/fleetspeak/fleetspeak/src/server/service"
 	"github.com/google/fleetspeak/fleetspeak/src/server/stats"
@@ -53,6 +55,7 @@ type Server struct {
 	broadcastManager *broadcasts.Manager
 	statsCollector   stats.Collector
 	authorizer       authorizer.Authorizer
+	clientCache      *cache.Clients
 }
 
 // MakeServer builds and initializes a fleetspeak server using the provided components.
@@ -75,9 +78,10 @@ func MakeServer(c *spb.ServerConfig, sc Components) (*Server, error) {
 		comms:          sc.Communicators,
 		statsCollector: sc.Stats,
 		authorizer:     sc.Authorizer,
+		clientCache:    cache.NewClients(),
 	}
 
-	s.serviceConfig = services.NewManager(sc.Datastore, sc.ServiceFactories, sc.Stats)
+	s.serviceConfig = services.NewManager(sc.Datastore, sc.ServiceFactories, sc.Stats, s.clientCache)
 
 	for _, pc := range c.Services {
 		if err := s.serviceConfig.Install(pc); err != nil {
@@ -101,8 +105,11 @@ func MakeServer(c *spb.ServerConfig, sc Components) (*Server, error) {
 	if c.BroadcastPollTime == nil {
 		c.BroadcastPollTime = &dpb.Duration{Seconds: 60}
 	}
-	bm, err := broadcasts.MakeManager(context.Background(), sc.Datastore,
-		time.Duration(c.BroadcastPollTime.Seconds)*time.Second+time.Duration(c.BroadcastPollTime.Nanos)*time.Nanosecond)
+	bm, err := broadcasts.MakeManager(
+		context.Background(),
+		sc.Datastore,
+		time.Duration(c.BroadcastPollTime.Seconds)*time.Second+time.Duration(c.BroadcastPollTime.Nanos)*time.Nanosecond,
+		s.clientCache)
 	if err != nil {
 		return nil, err
 	}
@@ -122,9 +129,10 @@ func (s *Server) Stop() {
 	s.processing.Wait()
 	s.serviceConfig.Stop()
 	if err := s.broadcastManager.Close(context.Background()); err != nil {
-		log.Printf("Error closing BroadcastManager: %v", err)
+		log.Errorf("Error closing BroadcastManager: %v", err)
 	}
 	if err := s.dataStore.Close(); err != nil {
-		log.Printf("Error closing datastore: %v", err)
+		log.Errorf("Error closing datastore: %v", err)
 	}
+	s.clientCache.Stop()
 }

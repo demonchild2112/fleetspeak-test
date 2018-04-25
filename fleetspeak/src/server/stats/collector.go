@@ -17,13 +17,24 @@
 package stats
 
 import (
+	"context"
 	"time"
 
+	"github.com/google/fleetspeak/fleetspeak/src/common"
+	"github.com/google/fleetspeak/fleetspeak/src/server/db"
+
+	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
 	mpb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak_monitoring"
 )
 
 // A PollInfo describes a client poll operation which has occurred.
 type PollInfo struct {
+	// A Context associated with the poll operation, if available.
+	CTX context.Context
+
+	// The ClientID of the polling client, if available.
+	ID common.ClientID
+
 	// When the operation started and ended.
 	Start, End time.Time
 
@@ -35,6 +46,9 @@ type PollInfo struct {
 
 	// Time spent reading and writing messages.
 	ReadTime, WriteTime time.Duration
+
+	// Whether the client was in the client cache.
+	CacheHit bool
 }
 
 // A Collector is a component which is notified when certain events occurred, to support
@@ -42,7 +56,7 @@ type PollInfo struct {
 type Collector interface {
 	// MessageIngested is called when a message is received from a client, or as
 	// a backlogged message from the datastore.
-	MessageIngested(service, messageType string, backlogged bool, payloadBytes int)
+	MessageIngested(backlogged bool, m *fspb.Message)
 
 	// MessageSaved is called when a message is first saved to the database.
 	MessageSaved(service, messageType string, forClient bool, savedPayloadBytes int)
@@ -67,5 +81,5 @@ type Collector interface {
 	DatastoreOperation(start, end time.Time, operation string, result error)
 
 	// ResourceUsageDataReceived is called every time a client-resource-usage proto is received.
-	ResourceUsageDataReceived(rud mpb.ResourceUsageData)
+	ResourceUsageDataReceived(cd *db.ClientData, rud mpb.ResourceUsageData, v *fspb.ValidationInfo)
 }

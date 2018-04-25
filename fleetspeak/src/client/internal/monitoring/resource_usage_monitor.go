@@ -15,16 +15,17 @@
 package monitoring
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
-	"sync/atomic"
+	"os"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
+
 	"github.com/google/fleetspeak/fleetspeak/src/client/service"
 
 	tspb "github.com/golang/protobuf/ptypes/timestamp"
@@ -33,7 +34,9 @@ import (
 )
 
 const (
-	epsilon float64 = 1e-4
+	epsilon             float64 = 1e-4
+	defaultSampleSize           = 20
+	defaultSamplePeriod         = 30 * time.Second
 )
 
 // AggregateResourceUsage is a helper function for aggregating resource-usage data across multiple
@@ -77,7 +80,7 @@ func AggregateResourceUsage(prevRU *ResourceUsage, currRU *ResourceUsage, numRUC
 		return nil
 	}
 
-	return aggregateMemoryResourceUsage(prevRU, currRU, numRUCalls, aggRU)
+	return aggregateMemoryResourceUsage(currRU, numRUCalls, aggRU)
 }
 
 func aggregateTimeResourceUsage(prevRU *ResourceUsage, currRU *ResourceUsage, numRUCalls int, aggRU *mpb.AggregatedResourceUsage) error {
@@ -106,7 +109,7 @@ func aggregateTimeResourceUsage(prevRU *ResourceUsage, currRU *ResourceUsage, nu
 	return nil
 }
 
-func aggregateMemoryResourceUsage(prevRU *ResourceUsage, currRU *ResourceUsage, numRUCalls int, aggRU *mpb.AggregatedResourceUsage) error {
+func aggregateMemoryResourceUsage(currRU *ResourceUsage, numRUCalls int, aggRU *mpb.AggregatedResourceUsage) error {
 	// Note that since rates are computed between two consecutive data-points, their
 	// average uses a sample size of n - 1, where n is the number of resource-usage queries.
 	aggRU.MeanResidentMemory += float64(currRU.ResidentMemory) / float64(numRUCalls)
@@ -149,41 +152,84 @@ type resourceUsageFetcherI interface {
 // ResourceUsageMonitor computes resource-usage metrics for a process and delivers them periodically
 // via a channel.
 type ResourceUsageMonitor struct {
-	sc      service.Context
-	RChan   <-chan mpb.ResourceUsageData
-	ErrChan <-chan error
+	sc service.Context
 
 	scope             string
 	pid               int
+	memoryLimit       int64
+	version           string
 	processStartTime  *tspb.Timestamp
 	maxSamplePeriod   time.Duration
 	initialSampleSize int
 	sampleSize        int
 
 	ruf      resourceUsageFetcherI
-	rChan    chan<- mpb.ResourceUsageData
 	errChan  chan<- error
-	doneChan chan struct{}
-
-	statsSent atomic.Value // whether the StatsReportLoop has sent at least one resource-usage report
+	doneChan <-chan struct{}
 }
 
-// NewResourceUsageMonitor creates a new ResourceUsageMonitor and starts it in a separate goroutine.
-func NewResourceUsageMonitor(sc service.Context, scope string, pid int, processStartTime time.Time, maxSamplePeriod time.Duration, sampleSize int, doneChan chan struct{}) (*ResourceUsageMonitor, error) {
-	return newResourceUsageMonitor(sc, ResourceUsageFetcher{}, scope, pid, processStartTime, maxSamplePeriod, sampleSize, doneChan)
+// ResourceUsageMonitorParams contains parameters that might be set when
+// creating a ResourceUsageMonitor.
+type ResourceUsageMonitorParams struct {
+	// What we are monitoring. Typically a service name, or 'system' for the
+	// Fleetspeak client itself.
+	Scope string
+
+	// The version string of the service that we are monitoring, if known.
+	Version string
+
+	// The process id that we are monitoring.
+	Pid int
+
+	// If nonzero, the monitored process should be killed if it exceeds this
+	// memory limit, in bytes.
+	MemoryLimit int64
+
+	// The time that the processes was started (if known).
+	ProcessStartTime time.Time
+
+	// The longest time to wait between samples.
+	MaxSamplePeriod time.Duration
+
+	// The number of resource-usage query results that get aggregated into
+	// a single resource-usage report sent to Fleetspeak servers.
+	SampleSize int
+
+	// The resource monitor will shut down when this channel is closed.
+	Done <-chan struct{}
+
+	// If set, the resource monitor will report errors on this channel. If unset,
+	// errors will be logged.
+	Err chan<- error
+
+	// If set, stubs out the actual resource fetching. Meant for use only in unit tests.
+	ruf resourceUsageFetcherI
 }
 
-func newResourceUsageMonitor(sc service.Context, ruf resourceUsageFetcherI, scope string, pid int, processStartTime time.Time, maxSamplePeriod time.Duration, sampleSize int, doneChan chan struct{}) (*ResourceUsageMonitor, error) {
-	startTimeProto, err := ptypes.TimestampProto(processStartTime)
-	if err != nil {
-		return nil, fmt.Errorf("process start time is invalid: %v", err)
+// New returns a new ResourceUsageMonitor, once created it must be started with
+// Run() and stopped by closing params.Done.
+func New(sc service.Context, params ResourceUsageMonitorParams) (*ResourceUsageMonitor, error) {
+	var startTimeProto *tspb.Timestamp
+	var err error
+
+	if !params.ProcessStartTime.IsZero() {
+		startTimeProto, err = ptypes.TimestampProto(params.ProcessStartTime)
+		if err != nil {
+			return nil, fmt.Errorf("process start time is invalid: %v", err)
+		}
 	}
 
-	if sampleSize < 2 {
-		return nil, errors.New("sample size must be at least 2 (for rate computation)")
+	if params.SampleSize == 0 {
+		params.SampleSize = defaultSampleSize
+	}
+	if params.MaxSamplePeriod == 0 {
+		params.MaxSamplePeriod = defaultSamplePeriod
+	}
+	if params.SampleSize < 2 {
+		return nil, fmt.Errorf("sample size %d invalid - must be at least 2 (for rate computation)", params.SampleSize)
 	}
 
-	maxSamplePeriodSecs := int(maxSamplePeriod / time.Second)
+	maxSamplePeriodSecs := int(params.MaxSamplePeriod / time.Second)
 	var backoffSize int
 	if maxSamplePeriodSecs == 0 {
 		backoffSize = 0
@@ -191,73 +237,34 @@ func newResourceUsageMonitor(sc service.Context, ruf resourceUsageFetcherI, scop
 		backoffSize = int(math.Log2(float64(maxSamplePeriodSecs)))
 	}
 	// First sample is bigger because of the backoff.
-	initialSampleSize := sampleSize + backoffSize
+	initialSampleSize := params.SampleSize + backoffSize
 
-	rChan := make(chan mpb.ResourceUsageData)
-	errChan := make(chan error)
-	m := ResourceUsageMonitor{
-		sc:      sc,
-		RChan:   rChan,
-		ErrChan: errChan,
-
-		scope:             scope,
-		pid:               pid,
-		processStartTime:  startTimeProto,
-		maxSamplePeriod:   maxSamplePeriod,
-		initialSampleSize: initialSampleSize,
-		sampleSize:        sampleSize,
-
-		ruf:      ruf,
-		rChan:    rChan,
-		errChan:  errChan,
-		doneChan: doneChan,
+	if params.ruf == nil {
+		params.ruf = ResourceUsageFetcher{}
 	}
 
-	go m.run()
+	m := ResourceUsageMonitor{
+		sc: sc,
+
+		scope:             params.Scope,
+		pid:               params.Pid,
+		memoryLimit:       params.MemoryLimit,
+		version:           params.Version,
+		processStartTime:  startTimeProto,
+		maxSamplePeriod:   params.MaxSamplePeriod,
+		initialSampleSize: initialSampleSize,
+		sampleSize:        params.SampleSize,
+
+		ruf:      params.ruf,
+		doneChan: params.Done,
+		errChan:  params.Err,
+	}
 
 	return &m, nil
 }
 
-// StatsSent returns whether or not the StatsReportLoop has sent at least one resource-usage report.
-func (m *ResourceUsageMonitor) StatsSent() bool {
-	return m.statsSent.Load() != nil
-}
-
-// StatsReporterLoop gathers stats from the dependent process and sends them to
-// fleetspeek approximately once every (maxSamplePeriod * sampleSize).
-func (m *ResourceUsageMonitor) StatsReporterLoop() {
-	ruReported := false
-	for {
-		select {
-		case <-m.doneChan:
-			return
-		case rud := <-m.RChan:
-			d, err := ptypes.MarshalAny(&rud)
-			if err != nil {
-				log.Printf("Unable to marshal ResourceUsageData: %v", err)
-				continue
-			}
-			ctx, c := context.WithTimeout(context.Background(), 30*time.Second)
-			m.sc.Send(ctx, service.AckMessage{
-				M: &fspb.Message{
-					Destination: &fspb.Address{ServiceName: "system"},
-					MessageType: "ResourceUsage",
-					Data:        d,
-				},
-			})
-			if !ruReported {
-				ruReported = true
-				m.statsSent.Store(true)
-			}
-			c()
-		case err := <-m.ErrChan:
-			log.Printf("Resource-usage monitor encountered an error: %v", err)
-			continue
-		}
-	}
-}
-
-func (m *ResourceUsageMonitor) run() {
+// Run is the business method of the resource-usage monitor. It blocks until doneChan is closed.
+func (m *ResourceUsageMonitor) Run() {
 	min := func(a, b time.Duration) time.Duration {
 		if b < a {
 			return b
@@ -291,9 +298,20 @@ func (m *ResourceUsageMonitor) run() {
 
 			currRU, err := m.ruf.ResourceUsageForPID(m.pid)
 			if err != nil {
-				m.errChan <- fmt.Errorf("failed to get resource usage for process[%d]: %v", m.pid, err)
+				m.errorf("failed to get resource usage for process[%d]: %v", m.pid, err)
 				resetSamples()
 				continue
+			}
+
+			if m.memoryLimit > 0 {
+				if currRU.ResidentMemory > m.memoryLimit {
+					// m.scope is the service name here.
+					log.Warningf("Memory limit (%d bytes) exceeded for %s; pid %d, killing.", m.memoryLimit, m.scope, m.pid)
+					p := os.Process{Pid: m.pid}
+					if err := p.Kill(); err != nil {
+						log.Errorf("Error while killing a process that exceeded its memory limit (%d bytes) - %s pid %d: %v", m.memoryLimit, m.scope, m.pid, err)
+					}
+				}
 			}
 
 			var ss int
@@ -305,7 +323,7 @@ func (m *ResourceUsageMonitor) run() {
 
 			err = AggregateResourceUsage(prevRU, currRU, ss, &aggRU, false)
 			if err != nil {
-				m.errChan <- fmt.Errorf("aggregation error: %v", err)
+				m.errorf("aggregation error: %v", err)
 				resetSamples()
 				continue
 			}
@@ -314,24 +332,53 @@ func (m *ResourceUsageMonitor) run() {
 			numSamplesCollected++
 
 			if numSamplesCollected == ss {
-				m.send(aggRU)
+				debugStatus, err := m.ruf.DebugStatusForPID(m.pid)
+				if err != nil {
+					m.errorf("failed to get debug status for process[%d]: %v", m.pid, err)
+				}
+				rud := &mpb.ResourceUsageData{
+					Scope:            m.scope,
+					Pid:              int64(m.pid),
+					ProcessStartTime: m.processStartTime,
+					Version:          m.version,
+					DataTimestamp:    ptypes.TimestampNow(),
+					ResourceUsage:    &aggRU,
+					DebugStatus:      debugStatus,
+				}
+				if err := SendResourceUsage(rud, m.sc); err != nil {
+					m.errorf("failed to send resource-usage data to the server: %v", err)
+					continue
+				}
 				resetSamples()
 			}
 		}
 	}
 }
 
-func (m *ResourceUsageMonitor) send(aggRU mpb.AggregatedResourceUsage) {
-	debugStatus, err := m.ruf.DebugStatusForPID(m.pid)
+func (m *ResourceUsageMonitor) errorf(format string, a ...interface{}) {
+	err := fmt.Errorf(format, a...)
+	if m.errChan == nil {
+		log.Errorf("Resource-usage monitor encountered an error: %v", err)
+	} else {
+		m.errChan <- err
+	}
+}
+
+// SendResourceUsage packages up resource-usage data and sends it to the server.
+func SendResourceUsage(rud *mpb.ResourceUsageData, sc service.Context) error {
+	d, err := ptypes.MarshalAny(rud)
 	if err != nil {
-		m.errChan <- fmt.Errorf("failed to get debug status for process[%d]: %v", m.pid, err)
+		return err
 	}
-	m.rChan <- mpb.ResourceUsageData{
-		Scope:            m.scope,
-		Pid:              int64(m.pid),
-		ProcessStartTime: m.processStartTime,
-		DataTimestamp:    ptypes.TimestampNow(),
-		ResourceUsage:    &aggRU,
-		DebugStatus:      debugStatus,
-	}
+	ctx, c := context.WithTimeout(context.Background(), 30*time.Second)
+	defer c()
+	return sc.Send(ctx, service.AckMessage{
+		M: &fspb.Message{
+			Destination: &fspb.Address{ServiceName: "system"},
+			MessageType: "ResourceUsage",
+			Data:        d,
+			Priority:    fspb.Message_LOW,
+			Background:  true,
+		},
+	})
 }

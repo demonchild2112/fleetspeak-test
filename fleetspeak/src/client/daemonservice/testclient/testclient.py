@@ -23,22 +23,56 @@ correctly implements the protocol expected by daemonservice.
 from google.apputils import app
 import gflags
 import logging
+import time
 
 import fleetspeak.src.client.daemonservice.client.client as clib
 
 FLAGS = gflags.FLAGS
 gflags.DEFINE_string("mode", "loopback",
-                    "Mode of operation. Options are: loopback")
+                     "Mode of operation. Options are: loopback")
+
+
+class FatalError(Exception):
+  pass
 
 
 def Loopback():
   logging.info("starting loopback")
-  con = clib.FleetspeakConnection()
+  con = clib.FleetspeakConnection(version="0.5")
   logging.info("connection created")
   while True:
     msg, _ = con.Recv()
     msg.message_type += "Response"
     con.Send(msg)
+
+
+def MemoryHog():
+  """Takes 20MB of memory, then sleeps forever."""
+  logging.info("starting memory leak")
+  con = clib.FleetspeakConnection(version="0.5")
+  logging.info("connection created")
+  buf = "a" * (1024*1024*20)
+  while True:
+    time.sleep(1)
+
+
+def Freezed():
+  """Connects to Fleetspeak, then sleeps indefinitely."""
+  logging.info("starting freezed")
+  con = clib.FleetspeakConnection(version="0.5")
+  logging.info("connection created")
+  while True:
+    time.sleep(1)
+
+
+def Heartbeat():
+  """Sends a heartbeat every second, indefinitely."""
+  logging.info("starting heartbeat")
+  con = clib.FleetspeakConnection(version="0.5")
+  logging.info("connection created")
+  while True:
+    time.sleep(1)
+    con.Heartbeat()
 
 
 def main(argv=None):
@@ -47,7 +81,20 @@ def main(argv=None):
   if FLAGS.mode == "loopback":
     Loopback()
     return
-  logging.fatal("Unknown mode: %s", FLAGS.mode)
+
+  if FLAGS.mode == "memoryhog":
+    MemoryHog()
+    return
+
+  if FLAGS.mode == "freezed":
+    Freezed()
+    return
+
+  if FLAGS.mode == "heartbeat":
+    Heartbeat()
+    return
+
+  raise FatalError("Unknown mode: %s", FLAGS.mode)
 
 
 if __name__ == "__main__":

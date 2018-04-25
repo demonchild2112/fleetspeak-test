@@ -34,7 +34,7 @@ import (
 	"sync"
 	"time"
 
-	"log"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"github.com/google/fleetspeak/fleetspeak/src/client/comms"
 	"github.com/google/fleetspeak/fleetspeak/src/common"
@@ -64,7 +64,6 @@ type Communicator struct {
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error) // If set, will be used to initiate network connections to the server.
 }
 
-// Setup implements client.Communicator.
 func (c *Communicator) Setup(cl comms.Context) error {
 	c.cctx = cl
 	return c.configure()
@@ -152,14 +151,12 @@ func (c *Communicator) configure() error {
 	return nil
 }
 
-// Start implements comms.Communicator.
 func (c *Communicator) Start() error {
 	c.working.Add(1)
 	go c.processingLoop()
 	return nil
 }
 
-// Stop implements comms.Communicator.
 func (c *Communicator) Stop() {
 	c.done()
 	c.working.Wait()
@@ -204,9 +201,12 @@ func (c *Communicator) processingLoop() {
 	// and updates the variables defined above. In case of failure it also sleeps
 	// for the MinFailureDelay.
 	poll := func() {
+		if c.cctx.CurrentID() != c.id {
+			c.configure()
+		}
 		active, err := c.poll(toSend)
 		if err != nil {
-			log.Printf("Failure during polling: %v", err)
+			log.Warningf("Failure during polling: %v", err)
 			for _, m := range toSend {
 				m.Nack()
 			}
@@ -246,8 +246,11 @@ func (c *Communicator) processingLoop() {
 		}
 
 		// Compute the time that we should next send (assuming we don't hit a send
-		// threshold). This could be MaxPollDelay after the last successfull send.
+		// threshold). This could be MaxPollDelay after the last successful send.
 		deadline := lastPoll.Add(jitter(c.conf.MaxPollDelaySeconds))
+		if log.V(2) {
+			log.Infof("Base wait of %v", deadline.Sub(time.Now()))
+		}
 
 		// If we received something recently, we reduce it to 200ms + 1/10 of the
 		// time since we last received a message. (Instructions often lead to more
@@ -256,6 +259,9 @@ func (c *Communicator) processingLoop() {
 			fpd := lastPoll.Add(200*time.Millisecond + time.Since(lastActive)/10)
 			if fpd.Before(deadline) {
 				deadline = fpd
+				if log.V(2) {
+					log.Infof("Last active %v ago, reduced wait to %v.", time.Since(lastActive), deadline.Sub(time.Now()))
+				}
 			}
 		}
 
@@ -270,6 +276,7 @@ func (c *Communicator) processingLoop() {
 
 		now := time.Now()
 		if now.After(deadline) || toSendSize > sendBytesThreshold || len(toSend) >= sendCountThreshold {
+			log.V(1).Info("Polling without delay.")
 			poll()
 			if c.ctx.Err() != nil {
 				return
@@ -285,6 +292,7 @@ func (c *Communicator) processingLoop() {
 			// any idle connection now.
 			c.hc.Transport.(*http.Transport).CloseIdleConnections()
 		}
+		log.V(1).Infof("Waiting %v for next poll.", delay)
 
 		select {
 		case <-c.ctx.Done():
@@ -316,7 +324,10 @@ func (c *Communicator) poll(toSend []comms.MessageInfo) (bool, error) {
 	msgs := make([]*fspb.Message, 0, len(toSend))
 	for _, m := range toSend {
 		msgs = append(msgs, m.M)
-		if m.M.Priority != fspb.Message_LOW {
+		if !m.M.Background {
+			if !sent && bool(log.V(2)) {
+				log.Infof("Activity: %s - %s", m.M.Destination.ServiceName, m.M.MessageType)
+			}
 			sent = true
 		}
 	}
@@ -335,31 +346,31 @@ func (c *Communicator) poll(toSend []comms.MessageInfo) (bool, error) {
 
 		resp, err := c.hc.Post(u.String(), "", bytes.NewReader(data))
 		if err != nil {
-			log.Printf("POST to %v failed with error: %v", u, err)
+			log.Warningf("POST to %v failed with error: %v", u, err)
 			continue
 		}
 
 		if resp.StatusCode != 200 {
-			log.Printf("POST to %v failed with status: %v", u, resp.StatusCode)
+			log.Warningf("POST to %v failed with status: %v", u, resp.StatusCode)
 			continue
 		}
 
 		var b bytes.Buffer
 		if _, err := b.ReadFrom(resp.Body); err != nil {
 			resp.Body.Close()
-			log.Print("Unable to read response body.")
+			log.Warning("Unable to read response body.")
 			continue
 		}
 		resp.Body.Close()
 
 		var r fspb.ContactData
 		if err := proto.Unmarshal(b.Bytes(), &r); err != nil {
-			log.Printf("Unable to parse ContactData from server: %v", err)
+			log.Warningf("Unable to parse ContactData from server: %v", err)
 			continue
 		}
 
 		if err := c.cctx.ProcessContactData(&r); err != nil {
-			log.Printf("Error processing ContactData from server: %v", err)
+			log.Warningf("Error processing ContactData from server: %v", err)
 			continue
 		}
 
@@ -374,7 +385,6 @@ func (c *Communicator) poll(toSend []comms.MessageInfo) (bool, error) {
 	return false, errors.New("unable to contact any server")
 }
 
-// GetFileIfModified implements comms.Communicator.
 func (c *Communicator) GetFileIfModified(ctx context.Context, service, name string, modSince time.Time) (io.ReadCloser, time.Time, error) {
 	var lastErr error
 	c.hostLock.RLock()

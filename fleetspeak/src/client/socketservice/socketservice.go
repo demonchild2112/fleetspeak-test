@@ -17,18 +17,21 @@
 package socketservice
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"sync"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/ptypes"
+
 	"github.com/google/fleetspeak/fleetspeak/src/client/channel"
+	"github.com/google/fleetspeak/fleetspeak/src/client/internal/monitoring"
 	"github.com/google/fleetspeak/fleetspeak/src/client/service"
 
+	fcpb "github.com/google/fleetspeak/fleetspeak/src/client/channel/proto/fleetspeak_channel"
 	sspb "github.com/google/fleetspeak/fleetspeak/src/client/socketservice/proto/fleetspeak_socketservice"
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
 )
@@ -47,6 +50,7 @@ func Factory(conf *fspb.ClientServiceConfig) (service.Service, error) {
 	}
 
 	return &Service{
+		name:    conf.Name,
 		cfg:     ssConf,
 		stop:    make(chan struct{}),
 		msgs:    make(chan *fspb.Message),
@@ -57,9 +61,10 @@ func Factory(conf *fspb.ClientServiceConfig) (service.Service, error) {
 // Service implements service.Service which communicates with an agent process
 // over a Unix domain socket (or a Windows named pipe).
 type Service struct {
-	cfg *sspb.Config
-	sc  service.Context
-	l   net.Listener
+	name string
+	cfg  *sspb.Config
+	sc   service.Context
+	l    net.Listener
 
 	stop chan struct{}      // closed to indicate that Stop() has been called
 	msgs chan *fspb.Message // passes messages to the monitorChannel goroutine
@@ -86,14 +91,12 @@ func (s *Service) Start(sc service.Context) error {
 	return nil
 }
 
-// Stop implements service.Service.
 func (s *Service) Stop() error {
 	close(s.stop)
 	s.routines.Wait()
 	return nil
 }
 
-// ProcessMessage implements service.Service.
 func (s *Service) ProcessMessage(ctx context.Context, m *fspb.Message) error {
 	select {
 	case s.msgs <- m:
@@ -116,17 +119,48 @@ func (s *Service) monitorChannel(ch *chanInfo) {
 		close(ch.done)
 		s.routines.Done()
 	}()
+L:
 	for {
 		select {
 		case err := <-ch.Err:
-			log.Printf("Channel closing with error: %v", err)
+			log.Errorf("Channel closing with error: %v", err)
 			return
 		case m, ok := <-ch.ra.In:
 			if !ok {
 				return
 			}
+			if m.M.Destination != nil && m.M.Destination.ServiceName == "system" && m.M.MessageType == "StartupData" {
+				if s.cfg.DisableResourceMonitoring {
+					continue L
+				}
+				sd := &fcpb.StartupData{}
+				if err := ptypes.UnmarshalAny(m.M.Data, sd); err != nil {
+					log.Warningf("Failed to parse startup data from initial message: %v", err)
+				}
+				// Start resource monitoring.
+				s.routines.Add(1)
+				go func() {
+					defer s.routines.Done()
+					rum, err := monitoring.New(s.sc, monitoring.ResourceUsageMonitorParams{
+						Scope:           s.name,
+						SampleSize:      int(s.cfg.ResourceMonitoringSampleSize),
+						MaxSamplePeriod: time.Duration(s.cfg.ResourceMonitoringSamplePeriodSeconds) * time.Second,
+
+						Pid:     int(sd.Pid),
+						Version: sd.Version,
+						Done:    ch.done,
+					})
+					if err != nil {
+						log.Errorf("Error creating ResourceUsageMonitor: %v", err)
+						return
+					}
+					rum.Run()
+				}()
+				// Startup messages don't pass through RelentlessChannel, so we don't need to call m.Ack.
+				continue L
+			}
 			if err := s.sc.Send(context.Background(), m); err != nil {
-				log.Printf("Error sending message: %v", err)
+				log.Errorf("Error sending message: %v", err)
 			}
 		}
 	}
@@ -189,7 +223,7 @@ func (s *Service) accept() *chanInfo {
 			r.ra = channel.NewRelentlessAcknowledger(r.Channel, 100)
 			return r
 		}
-		log.Printf("Accept returned error: %v", err)
+		log.Errorf("Accept returned error: %v", err)
 
 		select {
 		case <-s.stop:

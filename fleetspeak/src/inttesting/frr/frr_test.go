@@ -16,6 +16,7 @@ package frr
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -26,8 +27,7 @@ import (
 	"testing"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"google.golang.org/grpc"
@@ -38,8 +38,8 @@ import (
 	"github.com/google/fleetspeak/fleetspeak/src/server/service"
 
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
-	fpb "github.com/google/fleetspeak/fleetspeak/src/inttesting/frr/proto/fleetspeak_frr"
 	fgrpc "github.com/google/fleetspeak/fleetspeak/src/inttesting/frr/proto/fleetspeak_frr"
+	fpb "github.com/google/fleetspeak/fleetspeak/src/inttesting/frr/proto/fleetspeak_frr"
 	srpb "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
 )
 
@@ -197,6 +197,9 @@ func TestClientServiceEarlyShutdown(t *testing.T) {
 		MessageType: "TrafficRequest",
 	}
 	m.Data, err = ptypes.MarshalAny(&fpb.TrafficRequestData{RequestId: 1, NumMessages: 5})
+	if err != nil {
+		t.Fatalf("unable to marshal TrafficRequestData: %v", err)
+	}
 	if err := cs.ProcessMessage(context.Background(), &m); err != nil {
 		t.Error("unable to process message")
 	}
@@ -212,13 +215,13 @@ type fakeMasterServer struct {
 }
 
 func (s fakeMasterServer) RecordTrafficResponse(ctx context.Context, i *fpb.MessageInfo) (*fspb.EmptyMessage, error) {
-	log.Printf("recording m: %v", i)
+	log.Infof("recording m: %v", i)
 	s.rec <- i
 	return &fspb.EmptyMessage{}, nil
 }
 
 func (s fakeMasterServer) RecordFileResponse(ctx context.Context, i *fpb.FileResponseInfo) (*fspb.EmptyMessage, error) {
-	log.Printf("recording m: %v", i)
+	log.Infof("recording m: %v", i)
 	s.recFile <- i
 	return &fspb.EmptyMessage{}, nil
 }
@@ -244,7 +247,7 @@ func TestServerService(t *testing.T) {
 	}
 	defer s.Stop()
 	go func() {
-		log.Printf("Finished with: %v", s.Serve(tl))
+		log.Infof("Finished with: %v", s.Serve(tl))
 	}()
 
 	// Directly create and start a FRR service.

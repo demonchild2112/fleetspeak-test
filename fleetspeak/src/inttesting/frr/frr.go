@@ -18,17 +18,17 @@
 package frr
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"sync"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/ptypes"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 
 	cservice "github.com/google/fleetspeak/fleetspeak/src/client/service"
 	"github.com/google/fleetspeak/fleetspeak/src/common"
@@ -36,10 +36,10 @@ import (
 	"github.com/google/fleetspeak/fleetspeak/src/server/service"
 
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
-	fpb "github.com/google/fleetspeak/fleetspeak/src/inttesting/frr/proto/fleetspeak_frr"
 	fgrpc "github.com/google/fleetspeak/fleetspeak/src/inttesting/frr/proto/fleetspeak_frr"
-	srpb "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
+	fpb "github.com/google/fleetspeak/fleetspeak/src/inttesting/frr/proto/fleetspeak_frr"
 	sgrpc "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
+	srpb "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
 )
 
 const retryDelay = 15 * time.Second
@@ -96,7 +96,7 @@ func (s *frrClientService) processTrafficRequest(m *fspb.Message) error {
 		defer s.w.Done()
 
 		cnt := jitter(rd.NumMessages, rd.Jitter)
-		log.Printf("%v: creating %v responses for request %v", s.sc.GetLocalInfo().ClientID, cnt, rd.RequestId)
+		log.V(1).Infof("%v: creating %v responses for request %v", s.sc.GetLocalInfo().ClientID, cnt, rd.RequestId)
 		for i := int64(0); i < cnt; i++ {
 			delay := time.Duration(time.Millisecond * time.Duration(jitter(rd.MessageDelayMs, rd.Jitter)))
 			t := time.NewTimer(delay)
@@ -248,10 +248,10 @@ func (s *frrServerService) ProcessMessage(ctx context.Context, m *fspb.Message) 
 		if err := ptypes.UnmarshalAny(m.Data, &rd); err != nil {
 			log.Fatalf("unable to parse data as TrafficResponseData: %v", err)
 		}
-		// Zero the data field - save bandwith and cpu communicating with master.
+		// Zero the data field - save bandwidth and cpu communicating with master.
 		rd.Data = nil
 		if _, err := s.m.RecordTrafficResponse(ctx, &fpb.MessageInfo{ClientId: m.Source.ClientId, Data: &rd}); err != nil {
-			return service.TemporaryError{fmt.Errorf("failed to reach FRR master server: %v", err)}
+			return service.TemporaryError{E: fmt.Errorf("failed to reach FRR master server: %v", err)}
 		}
 	case "FileResponse":
 		var rd fpb.FileResponseData
@@ -259,7 +259,7 @@ func (s *frrServerService) ProcessMessage(ctx context.Context, m *fspb.Message) 
 			log.Fatalf("unable to parse data as FileResponseData: %v", err)
 		}
 		if _, err := s.m.RecordFileResponse(ctx, &fpb.FileResponseInfo{ClientId: m.Source.ClientId, Data: &rd}); err != nil {
-			return service.TemporaryError{fmt.Errorf("failed to reach FRR master server: %v", err)}
+			return service.TemporaryError{E: fmt.Errorf("failed to reach FRR master server: %v", err)}
 		}
 	default:
 		log.Fatalf("unknown message type: [%v]", m.MessageType)
@@ -282,7 +282,7 @@ type MasterServer struct {
 // NewMasterServer returns MasterServer object.
 func NewMasterServer(admin sgrpc.AdminClient) *MasterServer {
 	id := rand.Int63()
-	log.Printf("Creating master server with id: %v", id)
+	log.Infof("Creating master server with id: %v", id)
 	return &MasterServer{
 		clients:   make(map[common.ClientID]*clientInfo),
 		completed: nil,
@@ -339,7 +339,7 @@ func (s *MasterServer) RecordTrafficResponse(ctx context.Context, i *fpb.Message
 	if i.Data.MasterId != s.masterID {
 		return &fspb.EmptyMessage{}, nil
 	}
-	log.Printf("%v: processing message: %v, %v, %v", id, i.Data.RequestId, i.Data.ResponseIndex, i.Data.Fin)
+	log.V(2).Infof("%v: processing message: %v, %v, %v", id, i.Data.RequestId, i.Data.ResponseIndex, i.Data.Fin)
 
 	ci := s.getClientInfo(id)
 	ci.lock.Lock()
@@ -356,7 +356,7 @@ func (s *MasterServer) RecordTrafficResponse(ctx context.Context, i *fpb.Message
 	}
 
 	if ri.completed() {
-		log.Printf("%v: completed request %v", id, i.Data.RequestId)
+		log.V(1).Infof("%v: completed request %v", id, i.Data.RequestId)
 		if s.completed != nil {
 			select {
 			case <-ctx.Done():
@@ -487,7 +487,7 @@ func (s *MasterServer) CreateHunt(ctx context.Context, rd *fpb.TrafficRequestDat
 			break
 		}
 		if grpc.Code(err) == codes.Unavailable {
-			log.Printf("FS server unavailable, retrying in %v", retryDelay)
+			log.Warningf("FS server unavailable, retrying in %v", retryDelay)
 			time.Sleep(retryDelay)
 			continue
 		}
@@ -527,7 +527,7 @@ func (s *MasterServer) CreateFileDownloadHunt(ctx context.Context, name string, 
 			break
 		}
 		if grpc.Code(err) == codes.Unavailable {
-			log.Printf("FS server unavailable, retrying in %v", retryDelay)
+			log.Warningf("FS server unavailable, retrying in %v", retryDelay)
 			time.Sleep(retryDelay)
 			continue
 		}

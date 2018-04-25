@@ -15,16 +15,16 @@
 package broadcasts
 
 import (
+	"context"
 	"path"
 	"testing"
 	"time"
-
-	"context"
 
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/comtesting"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
 	"github.com/google/fleetspeak/fleetspeak/src/server/ids"
+	"github.com/google/fleetspeak/fleetspeak/src/server/internal/cache"
 	"github.com/google/fleetspeak/fleetspeak/src/server/sqlite"
 
 	apb "github.com/golang/protobuf/ptypes/any"
@@ -81,7 +81,7 @@ func TestManager(t *testing.T) {
 		}
 	}
 
-	bm, err := MakeManager(ctx, ds, 100*time.Millisecond)
+	bm, err := MakeManager(ctx, ds, 100*time.Millisecond, cache.NewClients())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,32 +16,32 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"net"
 	"path"
 	"time"
 
-	"flag"
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/ptypes"
 	"google.golang.org/grpc"
 
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/comtesting"
+	"github.com/google/fleetspeak/fleetspeak/src/server"
 	"github.com/google/fleetspeak/fleetspeak/src/server/admin"
 	"github.com/google/fleetspeak/fleetspeak/src/server/comms"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
 	"github.com/google/fleetspeak/fleetspeak/src/server/grpcservice"
 	"github.com/google/fleetspeak/fleetspeak/src/server/sertesting"
-	"github.com/google/fleetspeak/fleetspeak/src/server"
 	"github.com/google/fleetspeak/fleetspeak/src/server/service"
 	"github.com/google/fleetspeak/fleetspeak/src/server/sqlite"
 	"github.com/google/fleetspeak/fleetspeak/src/server/testserver"
 
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
 	gpb "github.com/google/fleetspeak/fleetspeak/src/server/grpcservice/proto/fleetspeak_grpcservice"
-	spb "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
 	sgrpc "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
+	spb "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
 )
 
 var (
@@ -61,7 +61,7 @@ func main() {
 	})
 
 	if err != nil {
-		log.Fatalf("Unable to create datastore[%s]: %v", p, err)
+		log.Exitf("Unable to create datastore[%s]: %v", p, err)
 	}
 	ts := testserver.Server{
 		DS: ds,
@@ -71,7 +71,7 @@ func main() {
 		Insecure: true,
 	})
 	if err != nil {
-		log.Fatalf("Unable to marshal grpcservice config: %v", err)
+		log.Exitf("Unable to marshal grpcservice config: %v", err)
 	}
 	s, err := server.MakeServer(
 		&spb.ServerConfig{
@@ -84,18 +84,18 @@ func main() {
 		server.Components{
 			Datastore:        ds,
 			ServiceFactories: map[string]service.Factory{"GRPC": grpcservice.Factory},
-			Communicators:    []comms.Communicator{&testserver.FakeCommunicator{&ts}},
+			Communicators:    []comms.Communicator{&testserver.FakeCommunicator{Dest: &ts}},
 		},
 	)
 	ts.S = s
 	if err != nil {
-		log.Fatalf("Unable to create server: %v", err)
+		log.Exitf("Unable to create server: %v", err)
 	}
 	serveAdminInterface(s, ds)
 
 	id, err := ts.AddClient()
 	if err != nil {
-		log.Fatalf("Unable to add client: %v", err)
+		log.Exitf("Unable to add client: %v", err)
 	}
 
 	m := &fspb.Message{
@@ -118,13 +118,13 @@ func main() {
 	// loopback during the first SimulateContact call.
 	msgs, err := ts.SimulateContactFromClient(ctx, id, []*fspb.Message{m})
 	if err != nil {
-		log.Fatalf("Error putting message into system: %v", err)
+		log.Exitf("Error putting message into system: %v", err)
 	}
 	var resp *fspb.Message
 	for len(msgs) == 0 {
 		msgs, err = ts.SimulateContactFromClient(ctx, id, nil)
 		if err != nil {
-			log.Fatalf("Error while waiting for loopback: %v", err)
+			log.Exitf("Error while waiting for loopback: %v", err)
 		}
 		if len(msgs) > 0 {
 			break
@@ -132,13 +132,13 @@ func main() {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if len(msgs) > 1 {
-		log.Fatalf("Expected 1 message back, got %d", len(msgs))
+		log.Exitf("Expected 1 message back, got %d", len(msgs))
 	}
 	resp = msgs[0]
 
-	log.Printf("Received through loopback: %+v", resp)
+	log.Infof("Received through loopback: %+v", resp)
 	if resp.MessageType != "TestMessage" {
-		log.Fatalf("Looped message had unexpected MessageType, got [%v] want [%v]", resp.MessageType, "TestMessage")
+		log.Exitf("Looped message had unexpected MessageType, got [%v] want [%v]", resp.MessageType, "TestMessage")
 	}
 }
 
@@ -148,16 +148,16 @@ func serveAdminInterface(fs *server.Server, ds db.Store) *grpc.Server {
 	sgrpc.RegisterAdminServer(gs, as)
 	addr, err := net.ResolveTCPAddr("tcp", *adminAddr)
 	if err != nil {
-		log.Fatalf("Unable to resolve admin listener address [%v]: %v", *adminAddr, err)
+		log.Exitf("Unable to resolve admin listener address [%v]: %v", *adminAddr, err)
 	}
 	l, err := net.ListenTCP("tcp", addr)
 	if err != nil {
-		log.Fatalf("Unable to listen on [%v]: %v", addr, err)
+		log.Exitf("Unable to listen on [%v]: %v", addr, err)
 	}
 	go func() {
 		err := gs.Serve(l)
-		log.Printf("Admin server finished with error: %v", err)
+		log.Errorf("Admin server finished with error: %v", err)
 	}()
-	log.Printf("Admin interface started, listening for clients on: %v", l.Addr())
+	log.Infof("Admin interface started, listening for clients on: %v", l.Addr())
 	return gs
 }

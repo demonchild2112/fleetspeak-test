@@ -15,6 +15,7 @@
 package client
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -22,8 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"github.com/google/fleetspeak/fleetspeak/src/client/service"
 	"github.com/google/fleetspeak/fleetspeak/src/common"
@@ -46,7 +46,7 @@ func (c *serviceConfiguration) ProcessMessage(ctx context.Context, m *fspb.Messa
 	c.lock.RUnlock()
 
 	if target == nil {
-		return fmt.Errorf("Destination service not installed.")
+		return fmt.Errorf("destination service not installed")
 	}
 	select {
 	case target.inbox <- m:
@@ -64,6 +64,18 @@ func (c *serviceConfiguration) InstallSignedService(sd *fspb.SignedClientService
 	var cfg fspb.ClientServiceConfig
 	if err := proto.Unmarshal(sd.ServiceConfig, &cfg); err != nil {
 		return fmt.Errorf("Unable to parse service config [%v], ignoring: %v", sd.Signature, err)
+	}
+
+ll:
+	for _, l := range cfg.RequiredLabels {
+		if l.ServiceName == "client" {
+			for _, cl := range c.client.cfg.ClientLabels {
+				if cl.Label == l.Label {
+					continue ll
+				}
+			}
+			return fmt.Errorf("service config requires label %v", l)
+		}
 	}
 
 	return c.InstallService(&cfg, sd.Signature)
@@ -107,7 +119,7 @@ func (c *serviceConfiguration) InstallService(cfg *fspb.ClientServiceConfig, sig
 		old.stop()
 	}
 
-	log.Printf("Started service %v with config:\n%v", cfg.Name, cfg)
+	log.Infof("Started service %v with config:\n%v", cfg.Name, cfg)
 	return nil
 }
 
@@ -190,7 +202,7 @@ func (d *serviceData) processingLoop() {
 		}
 		id, err := common.BytesToMessageID(m.MessageId)
 		if err != nil {
-			log.Printf("ignoring message with bad message id: [%v]", m.MessageId)
+			log.Errorf("ignoring message with bad message id: [%v]", m.MessageId)
 			continue
 		}
 		if err := d.service.ProcessMessage(context.TODO(), m); err != nil {

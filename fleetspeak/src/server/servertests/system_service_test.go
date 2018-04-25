@@ -16,11 +16,12 @@
 package servertests_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
-	"context"
 	"github.com/golang/protobuf/ptypes"
+
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
 	"github.com/google/fleetspeak/fleetspeak/src/server/sertesting"
@@ -130,6 +131,7 @@ func TestSystemServiceMessageAck(t *testing.T) {
 			Destination: &fspb.Address{
 				ClientId:    cid.Bytes(),
 				ServiceName: "TestService"},
+			CreationTime: db.NowProto(),
 		}}, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -197,6 +199,7 @@ func TestSystemServiceMessageError(t *testing.T) {
 			Destination: &fspb.Address{
 				ClientId:    cid.Bytes(),
 				ServiceName: "TestService"},
+			CreationTime: db.NowProto(),
 		}}, ""); err != nil {
 		t.Fatal(err)
 	}

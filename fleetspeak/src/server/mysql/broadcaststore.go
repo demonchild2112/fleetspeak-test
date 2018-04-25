@@ -15,12 +15,12 @@
 package mysql
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
-	"context"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
@@ -64,8 +64,8 @@ func fromBroadcastProto(b *spb.Broadcast) (*dbBroadcast, error) {
 		messageType:       b.MessageType,
 	}
 	if b.ExpirationTime != nil {
-		res.expirationTimeSeconds = sql.NullInt64{b.ExpirationTime.Seconds, true}
-		res.expirationTimeNanos = sql.NullInt64{int64(b.ExpirationTime.Nanos), true}
+		res.expirationTimeSeconds = sql.NullInt64{Int64: b.ExpirationTime.Seconds, Valid: true}
+		res.expirationTimeNanos = sql.NullInt64{Int64: int64(b.ExpirationTime.Nanos), Valid: true}
 	}
 	if b.Data != nil {
 		res.dataTypeURL = sql.NullString{String: b.Data.TypeUrl, Valid: true}
@@ -99,7 +99,6 @@ func toBroadcastProto(b *dbBroadcast) (*spb.Broadcast, error) {
 	return ret, nil
 }
 
-// CreateBroadcast implements db.BroadcastStore.
 func (d *Datastore) CreateBroadcast(ctx context.Context, b *spb.Broadcast, limit uint64) error {
 	dbB, err := fromBroadcastProto(b)
 	if err != nil {
@@ -140,7 +139,6 @@ func (d *Datastore) CreateBroadcast(ctx context.Context, b *spb.Broadcast, limit
 	})
 }
 
-// SetBroadcastLimit implements db.BroadcastStore.
 func (d *Datastore) SetBroadcastLimit(ctx context.Context, id ids.BroadcastID, limit uint64) error {
 	return d.runInTx(ctx, false, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, "UPDATE broadcasts(message_limit) VALUES(?) WHERE broadcast_id=?", limit, id.String())
@@ -148,7 +146,6 @@ func (d *Datastore) SetBroadcastLimit(ctx context.Context, id ids.BroadcastID, l
 	})
 }
 
-// SaveBroadcastMessage implements db.BroadcastStore.
 func (d *Datastore) SaveBroadcastMessage(ctx context.Context, msg *fspb.Message, bID ids.BroadcastID, cID common.ClientID, aID ids.AllocationID) error {
 	dbm, err := fromMessageProto(msg)
 	if err != nil {
@@ -180,15 +177,15 @@ func (d *Datastore) SaveBroadcastMessage(ctx context.Context, msg *fspb.Message,
 		if _, err := tx.ExecContext(ctx, "UPDATE broadcast_allocations SET sent = ? WHERE broadcast_id = ? AND allocation_id = ?", as+1, bID.String(), aID.String()); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, "INSERT INTO broadcast_sent(broadcast_id, client_id) VALUES (?, ?)", bID.String(), cID.String())
+		_, err = tx.ExecContext(ctx, "INSERT INTO broadcast_sent(broadcast_id, client_id) VALUES (?, ?)", bID.String(), cID.Bytes())
 		return err
 	})
 }
 
-// ListActiveBroadcasts implements db.BroadcastStore.
 func (d *Datastore) ListActiveBroadcasts(ctx context.Context) ([]*db.BroadcastInfo, error) {
 	var ret []*db.BroadcastInfo
 	err := d.runInTx(ctx, true, func(tx *sql.Tx) error {
+		ret = nil
 		now := db.NowProto()
 		rs, err := tx.QueryContext(ctx, "SELECT "+
 			"broadcast_id, "+
@@ -242,10 +239,10 @@ func (d *Datastore) ListActiveBroadcasts(ctx context.Context) ([]*db.BroadcastIn
 		}
 		rs.Close()
 		stmt, err := tx.Prepare("SELECT service_name, label FROM broadcast_labels WHERE broadcast_id = ?")
-		defer stmt.Close()
 		if err != nil {
 			return err
 		}
+		defer stmt.Close()
 		for _, i := range ret {
 			id, err := ids.BytesToBroadcastID(i.Broadcast.BroadcastId)
 			if err != nil {
@@ -271,9 +268,8 @@ func (d *Datastore) ListActiveBroadcasts(ctx context.Context) ([]*db.BroadcastIn
 	return ret, err
 }
 
-// ListSentBroadcasts implements db.BroadcastStore.
 func (d *Datastore) ListSentBroadcasts(ctx context.Context, id common.ClientID) ([]ids.BroadcastID, error) {
-	rs, err := d.db.QueryContext(ctx, "SELECT broadcast_id FROM broadcast_sent WHERE client_id = ?", id.String())
+	rs, err := d.db.QueryContext(ctx, "SELECT broadcast_id FROM broadcast_sent WHERE client_id = ?", id.Bytes())
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +293,6 @@ func (d *Datastore) ListSentBroadcasts(ctx context.Context, id common.ClientID) 
 	return res, nil
 }
 
-// CreateAllocation implements db.BroadcastStore.
 func (d *Datastore) CreateAllocation(ctx context.Context, id ids.BroadcastID, frac float32, expiry time.Time) (*db.AllocationInfo, error) {
 	var ret *db.AllocationInfo
 	err := d.runInTx(ctx, false, func(tx *sql.Tx) error {
@@ -345,7 +340,6 @@ func (d *Datastore) CreateAllocation(ctx context.Context, id ids.BroadcastID, fr
 	return ret, err
 }
 
-// CleanupAllocation implements db.BroadcastStore.
 func (d *Datastore) CleanupAllocation(ctx context.Context, bID ids.BroadcastID, aID ids.AllocationID) error {
 	return d.runInTx(ctx, false, func(tx *sql.Tx) error {
 		var b dbBroadcast

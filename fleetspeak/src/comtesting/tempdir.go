@@ -18,9 +18,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"runtime"
 
-	"log"
+	log "github.com/golang/glog"
 )
 
 var tempDir string
@@ -34,7 +33,7 @@ var tempDir string
 // can be returned as the temp dir, and gets cluttered quickly.
 func GetTempDir(testName string) (string, func()) {
 	if tempDir != "" {
-		return tempDir, cleanup
+		return tempDir, cleanupTempDir
 	}
 
 	tempDir = os.Getenv("TEST_TMPDIR")
@@ -46,19 +45,6 @@ func GetTempDir(testName string) (string, func()) {
 		}
 		tempDir = d
 	}
-	log.Printf("Created temp directory: %s", tempDir)
-	return tempDir, cleanup
-}
-
-func cleanup() {
-	if runtime.GOOS != "windows" || tempDir == "" {
-		return
-	}
-
-	if err := os.RemoveAll(tempDir); err != nil {
-		log.Printf("Failed to cleanup temp dir; os.RemoveAll(%q): %v", tempDir, err)
-		return
-	}
-
-	tempDir = ""
+	log.Infof("Created temp directory: %s", tempDir)
+	return tempDir, cleanupTempDir
 }

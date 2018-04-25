@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -22,12 +23,12 @@ import (
 	"strconv"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
 
+	"github.com/golang/protobuf/proto"
 	apb "github.com/golang/protobuf/ptypes/any"
 	tpb "github.com/golang/protobuf/ptypes/timestamp"
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
@@ -47,7 +48,7 @@ type dbMessage struct {
 	creationTimeNanos      int32
 	processedTimeSeconds   sql.NullInt64
 	processedTimeNanos     sql.NullInt64
-	validationInfo         sql.NullString
+	validationInfo         []byte
 	failed                 sql.NullBool
 	failedReason           sql.NullString
 	retryCount             uint32
@@ -57,6 +58,10 @@ type dbMessage struct {
 
 func toMicro(t time.Time) int64 {
 	return t.UnixNano() / 1000
+}
+
+func (d *Datastore) SetMessageResult(ctx context.Context, dest common.ClientID, id common.MessageID, res *fspb.MessageResult) error {
+	return d.runInTx(func(tx *sql.Tx) error { return d.trySetMessageResult(ctx, tx, id, res) })
 }
 
 func (d *Datastore) trySetMessageResult(ctx context.Context, tx *sql.Tx, id common.MessageID, res *fspb.MessageResult) error {
@@ -147,8 +152,12 @@ func fromMessageProto(m *fspb.Message) (*dbMessage, error) {
 		dbm.dataTypeURL = sql.NullString{String: m.Data.TypeUrl, Valid: true}
 		dbm.dataValue = m.Data.Value
 	}
-	if m.ValidationInfo != "" {
-		dbm.validationInfo = sql.NullString{String: m.ValidationInfo, Valid: true}
+	if m.ValidationInfo != nil {
+		b, err := proto.Marshal(m.ValidationInfo)
+		if err != nil {
+			return nil, err
+		}
+		dbm.validationInfo = b
 	}
 	return dbm, nil
 }
@@ -204,13 +213,16 @@ func toMessageProto(m *dbMessage) (*fspb.Message, error) {
 			Value:   m.dataValue,
 		}
 	}
-	if m.validationInfo.Valid {
-		pm.ValidationInfo = m.validationInfo.String
+	if len(m.validationInfo) > 0 {
+		v := &fspb.ValidationInfo{}
+		if err := proto.Unmarshal(m.validationInfo, v); err != nil {
+			return nil, err
+		}
+		pm.ValidationInfo = v
 	}
 	return pm, nil
 }
 
-// StoreMessages implements db.MessageStore.
 func (d *Datastore) StoreMessages(ctx context.Context, msgs []*fspb.Message, contact db.ContactID) error {
 	d.l.Lock()
 	defer d.l.Unlock()
@@ -219,17 +231,28 @@ func (d *Datastore) StoreMessages(ctx context.Context, msgs []*fspb.Message, con
 
 	return d.runInTx(func(tx *sql.Tx) error {
 		for _, m := range msgs {
-			// If it is already processed, we don't want to save m.Data. This is a
-			// little bit iffy (m.Data is really owned by the caller) but FS shouldn't
-			// need or access Data of a completed operation during or after the save.
-			if m.Result != nil {
-				m.Data = nil
-			}
 			dbm, err := fromMessageProto(m)
 			if err != nil {
 				return err
 			}
+			// If it is already processed, we don't want to save m.Data.
+			if m.Result != nil {
+				dbm.dataTypeURL = sql.NullString{Valid: false}
+				dbm.dataValue = nil
+			}
 			ids = append(ids, dbm.messageID)
+			if m.Result != nil && !m.Result.Failed {
+				if err := d.tryStoreMessage(ctx, tx, dbm, false); err != nil {
+					return err
+				}
+				if m.Result != nil {
+					mid, _ := common.BytesToMessageID(m.MessageId)
+					if err := d.trySetMessageResult(ctx, tx, mid, m.Result); err != nil {
+						return err
+					}
+				}
+				continue
+			}
 			var processedTime sql.NullInt64
 			var failed sql.NullBool
 			e := tx.QueryRowContext(ctx, "SELECT processed_time_seconds, failed FROM messages where message_id=?", dbm.messageID).Scan(&processedTime, &failed)
@@ -242,7 +265,7 @@ func (d *Datastore) StoreMessages(ctx context.Context, msgs []*fspb.Message, con
 			case e != nil:
 				return e
 			case processedTime.Valid && (!failed.Valid || !failed.Bool):
-				// Message previously sucessfully processed, ignore this reprocessing.
+				// Message previously successfully processed, ignore this reprocessing.
 			case m.Result != nil && (!processedTime.Valid || !m.Result.Failed):
 				mid, err := common.BytesToMessageID(m.MessageId)
 				if err != nil {
@@ -265,7 +288,7 @@ func (d *Datastore) StoreMessages(ctx context.Context, msgs []*fspb.Message, con
 		c, err := strconv.ParseUint(string(contact), 16, 64)
 		if err != nil {
 			e := fmt.Errorf("unable to parse ContactID [%v]: %v", contact, err)
-			log.Print(e)
+			log.Error(e)
 			return e
 		}
 		for _, id := range ids {
@@ -278,6 +301,9 @@ func (d *Datastore) StoreMessages(ctx context.Context, msgs []*fspb.Message, con
 }
 
 func (d *Datastore) tryStoreMessage(ctx context.Context, tx *sql.Tx, dbm *dbMessage, isBroadcast bool) error {
+	if dbm.creationTimeSeconds == 0 {
+		return errors.New("message CreationTime must be set")
+	}
 	res, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO messages("+
 		"message_id, "+
 		"source_client_id, "+
@@ -348,7 +374,6 @@ func (d *Datastore) tryStoreMessage(ctx context.Context, tx *sql.Tx, dbm *dbMess
 	return nil
 }
 
-// GetMessages implements db.MessageStore.
 func (d *Datastore) GetMessages(ctx context.Context, ids []common.MessageID, wantData bool) ([]*fspb.Message, error) {
 	d.l.Lock()
 	defer d.l.Unlock()
@@ -415,7 +440,6 @@ func (d *Datastore) GetMessages(ctx context.Context, ids []common.MessageID, wan
 	return res, err
 }
 
-// GetMessageStatus implements db.MessageStore.
 func (d *Datastore) GetMessageResult(ctx context.Context, id common.MessageID) (*fspb.MessageResult, error) {
 	d.l.Lock()
 	defer d.l.Unlock()
@@ -541,10 +565,9 @@ type messageLooper struct {
 	loopDone         chan struct{}
 }
 
-// RegisterMessageProcessor implements db.MessageStore.
 func (d *Datastore) RegisterMessageProcessor(mp db.MessageProcessor) {
 	if d.looper != nil {
-		log.Print("Attempt to register a second MessageProcessor.")
+		log.Warning("Attempt to register a second MessageProcessor.")
 		d.looper.stop()
 	}
 	d.looper = &messageLooper{
@@ -557,7 +580,6 @@ func (d *Datastore) RegisterMessageProcessor(mp db.MessageProcessor) {
 	go d.looper.messageProcessingLoop()
 }
 
-// StopMessageProcessor implements db.MessageStore.
 func (d *Datastore) StopMessageProcessor() {
 	if d.looper != nil {
 		d.looper.stop()
@@ -590,11 +612,11 @@ func (l *messageLooper) processMessages() {
 		msgs, err := l.d.internalMessagesForProcessing(context.Background(), common.ClientID{}, 5)
 		if err != nil {
 			if err.Error() == "attempt to write a readonly database" {
-				log.Printf("Failed to read server messages for processing; probably the database was removed: %v", err)
+				log.Errorf("Failed to read server messages for processing; probably the database was removed: %v", err)
 				return
 			}
 
-			log.Printf("Failed to read server messages for processing: %v", err)
+			log.Errorf("Failed to read server messages for processing: %v", err)
 			continue
 		}
 		l.mp.ProcessMessages(msgs)

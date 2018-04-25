@@ -17,6 +17,7 @@
 package broadcasts
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -25,11 +26,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
 	"github.com/google/fleetspeak/fleetspeak/src/server/ids"
+	"github.com/google/fleetspeak/fleetspeak/src/server/internal/cache"
 	"github.com/google/fleetspeak/fleetspeak/src/server/internal/ftime"
 
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
@@ -51,17 +52,19 @@ type Manager struct {
 	l            sync.RWMutex // Protects the structure of i.
 	done         chan bool    // Closes to indicate it is time to shut down.
 	basePollWait time.Duration
+	clientCache  *cache.Clients
 }
 
 // MakeManager creates a Manager, populates it with the
 // current set of broadcasts, and begins updating the broadcasts in the
 // background, the time between updates is always between pw and 2*pw.
-func MakeManager(ctx context.Context, bs db.BroadcastStore, pw time.Duration) (*Manager, error) {
+func MakeManager(ctx context.Context, bs db.BroadcastStore, pw time.Duration, clientCache *cache.Clients) (*Manager, error) {
 	r := &Manager{
 		bs:           bs,
 		infos:        make(map[ids.BroadcastID]*bInfo),
 		done:         make(chan bool),
 		basePollWait: pw,
+		clientCache:  clientCache,
 	}
 	if err := r.refreshInfo(ctx); err != nil {
 		return nil, err
@@ -70,14 +73,14 @@ func MakeManager(ctx context.Context, bs db.BroadcastStore, pw time.Duration) (*
 	return r, nil
 }
 
-// bInfo containes what a broadcast manager needs to know about a broadcast.
+// bInfo contains what a broadcast manager needs to know about a broadcast.
 type bInfo struct {
 	bID      ids.BroadcastID
 	b        *spb.Broadcast
 	useCount sync.WaitGroup // How many goroutines are using this bInfo and associated allocation.
 
 	// The remaining fields describe the allocation that we have for the broadcast. If limit is
-	// set to BroadcastUnlimited, then we don't actualy have (or need) an allocation.
+	// set to BroadcastUnlimited, then we don't actually have (or need) an allocation.
 	aID    ids.AllocationID
 	limit  uint64
 	sent   uint64 // How many messages have we sent under the current allocation, only accessed through atomic.
@@ -165,7 +168,7 @@ Infos:
 	for _, i := range is {
 		mid, err := common.RandomMessageID()
 		if err != nil {
-			log.Printf("unable to create message id: %v", err)
+			log.Errorf("unable to create message id: %v", err)
 			if i.limit != db.BroadcastUnlimited {
 				// Incantation to decrement a uint64, recommend AddUint64 docs:
 				atomic.AddUint64(&i.sent, ^uint64(0))
@@ -188,7 +191,7 @@ Infos:
 		err = m.bs.SaveBroadcastMessage(ctx, msg, i.bID, id, i.aID)
 		i.lock.Unlock()
 		if err != nil {
-			log.Printf("SaveBroadcastMessage of instance of broadcast %v failed. Not sending. [%v]", i.bID, err)
+			log.Errorf("SaveBroadcastMessage of instance of broadcast %v failed. Not sending. [%v]", i.bID, err)
 			if i.limit != db.BroadcastUnlimited {
 				// Incantation to decrement a uint64, recommend by AddUint64 docs:
 				atomic.AddUint64(&i.sent, ^uint64(0))
@@ -214,7 +217,7 @@ func (m *Manager) refreshLoop() {
 		}
 
 		if err := m.refreshInfo(ctx); err != nil {
-			log.Printf("Error refreshing broadcast infos: %v", err)
+			log.Errorf("Error refreshing broadcast infos: %v", err)
 
 		}
 	}
@@ -237,7 +240,7 @@ func (m *Manager) refreshInfo(ctx context.Context) error {
 	for _, b := range bs {
 		id, err := ids.BytesToBroadcastID(b.Broadcast.BroadcastId)
 		if err != nil {
-			log.Printf("Broadcast [%v] has bad id, skipping: %v", b.Broadcast, err)
+			log.Errorf("Broadcast [%v] has bad id, skipping: %v", b.Broadcast, err)
 			continue
 		}
 		activeIds[id] = true
@@ -247,7 +250,7 @@ func (m *Manager) refreshInfo(ctx context.Context) error {
 			}
 			a, err := m.bs.CreateAllocation(ctx, id, allocFrac, ftime.Now().Add(allocDuration))
 			if err != nil {
-				log.Printf("Unable to create alloc for broadcast %v, skipping: %v", id, err)
+				log.Errorf("Unable to create alloc for broadcast %v, skipping: %v", id, err)
 				continue
 			}
 			if a != nil {
@@ -275,6 +278,12 @@ func (m *Manager) refreshInfo(ctx context.Context) error {
 
 	// Swap/insert the new allocations.
 	c := m.updateAllocs(curr, newAllocs)
+
+	// If we added any new allocations, then we should recompute broadcasts for
+	// any cached clients.
+	if len(newAllocs) > 0 {
+		m.clientCache.Clear()
+	}
 
 	var errMsgs []string
 	// Cleanup the dead allocations. They've been removed from m.infos, so

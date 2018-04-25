@@ -15,6 +15,7 @@
 package socketservice
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -25,16 +26,16 @@ import (
 	"testing"
 	"time"
 
-	"log"
-	"context"
-
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
+
 	"github.com/google/fleetspeak/fleetspeak/src/client/clitesting"
 	"github.com/google/fleetspeak/fleetspeak/src/comtesting"
 
 	sspb "github.com/google/fleetspeak/fleetspeak/src/client/socketservice/proto/fleetspeak_socketservice"
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
+	mpb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak_monitoring"
 )
 
 func getTempDir() (string, func(), error) {
@@ -109,14 +110,14 @@ func exerciseLoopback(t *testing.T, socketPath string) {
 	ctx := context.Background()
 	go func() {
 		for _, m := range msgs {
-			log.Printf("Processing message [%x]", m.MessageId)
+			log.Infof("Processing message [%x]", m.MessageId)
 			err := s.ProcessMessage(ctx, m)
 			if err != nil {
 				t.Errorf("Error processing message: %v", err)
 			}
-			log.Print("Message Processed.")
+			log.Info("Message Processed.")
 		}
-		log.Print("Done processing messages.")
+		log.Info("Done processing messages.")
 	}()
 	for _, m := range msgs {
 		g := <-sc.OutChan
@@ -130,7 +131,7 @@ func exerciseLoopback(t *testing.T, socketPath string) {
 			t.Errorf("Unexpected message from loopback: got [%v], want [%v]", got, want)
 		}
 	}
-	log.Printf("looped %d messages", len(msgs))
+	log.Infof("looped %d messages", len(msgs))
 }
 
 func TestLoopback(t *testing.T) {
@@ -228,7 +229,7 @@ func TestStutteringLoopback(t *testing.T) {
 
 	starts := make(chan struct{}, 1)
 	s.(*Service).newChan = func() {
-		log.Printf("starting new channel")
+		log.Infof("starting new channel")
 		starts <- struct{}{}
 	}
 
@@ -255,7 +256,7 @@ func TestStutteringLoopback(t *testing.T) {
 		// Wait for the looped message. After sending the message, the other end
 		// will close and restart.
 		m := <-sc.OutChan
-		log.Printf("received looped back message: %x", m.MessageId)
+		log.Infof("received looped back message: %x", m.MessageId)
 	}
 	if err := s.Stop(); err != nil {
 		t.Errorf("Error stopping service: %v", err)
@@ -265,7 +266,7 @@ func TestStutteringLoopback(t *testing.T) {
 func TestMaxSockLenUnix(t *testing.T) {
 	var maxSockLen int
 	if runtime.GOOS == "windows" {
-		return // Test doesn't apply.
+		t.Skip("Not applicable to windows.")
 	} else if runtime.GOOS == "darwin" {
 		maxSockLen = 103
 	} else {
@@ -276,5 +277,79 @@ func TestMaxSockLenUnix(t *testing.T) {
 	_, got := listen(sockPath)
 	if got.Error() != want.Error() {
 		t.Errorf("Wrong error received. Want '%s'; got '%s'", want, got)
+	}
+}
+
+func TestResourceMonitoring(t *testing.T) {
+	tmpDir, cleanUpFn, err := getTempDir()
+	if err != nil {
+		t.Fatalf("Failed to create tempdir for test: %v", err)
+	}
+	defer cleanUpFn()
+	socketPath := path.Join(tmpDir, "Loopback")
+
+	cmd := exec.Command(testClient(), "--mode=loopback", "--socket_path="+socketPath)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd.Start() returned error: %v", err)
+	}
+	defer func() {
+		if err := cmd.Process.Kill(); err != nil {
+			t.Errorf("failed to kill testclient[%d]: %v", cmd.Process.Pid, err)
+		}
+		if err := cmd.Wait(); err != nil {
+			if !isErrKilled(err) {
+				t.Errorf("error waiting for testclient: %v", err)
+			}
+		}
+	}()
+
+	ssc := sspb.Config{
+		ApiProxyPath:                          socketPath,
+		ResourceMonitoringSampleSize:          2,
+		ResourceMonitoringSamplePeriodSeconds: 1,
+	}
+	sscAny, err := ptypes.MarshalAny(&ssc)
+	if err != nil {
+		t.Fatalf("ptypes.MarshalAny(*socketservice.Config): %v", err)
+	}
+	s, err := Factory(&fspb.ClientServiceConfig{
+		Name:   "TestSocketService",
+		Config: sscAny,
+	})
+	if err != nil {
+		t.Fatalf("Factory(...): %v", err)
+	}
+
+	sc := clitesting.MockServiceContext{
+		OutChan: make(chan *fspb.Message, 5),
+	}
+	if err := s.Start(&sc); err != nil {
+		t.Fatalf("socketservice.Start(...): %v", err)
+	}
+	defer func() {
+		if err := s.Stop(); err != nil {
+			t.Errorf("Error stopping service: %v", err)
+		}
+	}()
+
+	to := time.After(10 * time.Second)
+	select {
+	case <-to:
+		t.Errorf("resource usage report not received")
+		return
+	case m := <-sc.OutChan:
+		if m.MessageType != "ResourceUsage" {
+			t.Errorf("expected ResourceUsage, got %+v", m)
+		}
+		rud := &mpb.ResourceUsageData{}
+		if err := ptypes.UnmarshalAny(m.Data, rud); err != nil {
+			t.Fatalf("Unable to unmarshal ResourceUsageData: %v", err)
+		}
+		if rud.Pid != int64(cmd.Process.Pid) {
+			t.Errorf("ResourceUsageData.Pid=%d, but test client has pid %d", rud.Pid, cmd.Process.Pid)
+		}
+		if rud.Version != "0.5" {
+			t.Errorf("ResourceUsageData.Version=\"%s\" but expected \"0.5\"", rud.Version)
+		}
 	}
 }

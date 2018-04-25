@@ -19,30 +19,29 @@ package integrationtest
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/ptypes"
-
-	chttps "github.com/google/fleetspeak/fleetspeak/src/client/https"
-	"github.com/google/fleetspeak/fleetspeak/src/server/admin"
 	"google.golang.org/grpc"
 
 	"github.com/google/fleetspeak/fleetspeak/src/client"
 	"github.com/google/fleetspeak/fleetspeak/src/client/config"
+	chttps "github.com/google/fleetspeak/fleetspeak/src/client/https"
 	cservice "github.com/google/fleetspeak/fleetspeak/src/client/service"
 	"github.com/google/fleetspeak/fleetspeak/src/comtesting"
 	"github.com/google/fleetspeak/fleetspeak/src/inttesting/frr"
+	"github.com/google/fleetspeak/fleetspeak/src/server"
+	"github.com/google/fleetspeak/fleetspeak/src/server/admin"
 	"github.com/google/fleetspeak/fleetspeak/src/server/comms"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
 	"github.com/google/fleetspeak/fleetspeak/src/server/https"
 	"github.com/google/fleetspeak/fleetspeak/src/server/sertesting"
-	"github.com/google/fleetspeak/fleetspeak/src/server"
 	"github.com/google/fleetspeak/fleetspeak/src/server/service"
 	"github.com/google/fleetspeak/fleetspeak/src/server/stats"
 
@@ -50,10 +49,10 @@ import (
 	clpb "github.com/google/fleetspeak/fleetspeak/src/client/proto/fleetspeak_client"
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
 	mpb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak_monitoring"
-	fpb "github.com/google/fleetspeak/fleetspeak/src/inttesting/frr/proto/fleetspeak_frr"
 	fgrpc "github.com/google/fleetspeak/fleetspeak/src/inttesting/frr/proto/fleetspeak_frr"
-	spb "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
+	fpb "github.com/google/fleetspeak/fleetspeak/src/inttesting/frr/proto/fleetspeak_frr"
 	sgrpc "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
+	spb "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
 )
 
 const numClients = 5
@@ -63,8 +62,8 @@ type statsCounter struct {
 	messagesIngested, payloadBytesSaved, messagesProcessed, messagesErrored, messagesDropped, clientPolls, datastoreOperations int64
 }
 
-func (c *statsCounter) MessageIngested(service, messageType string, backlogged bool, payloadBytes int) {
-	if service == "FRR" {
+func (c *statsCounter) MessageIngested(backlogged bool, m *fspb.Message) {
+	if m.Destination.ServiceName == "FRR" {
 		atomic.AddInt64(&c.messagesIngested, 1)
 	}
 }
@@ -101,11 +100,11 @@ func (c *statsCounter) DatastoreOperation(start, end time.Time, operation string
 	atomic.AddInt64(&c.datastoreOperations, 1)
 }
 
-func (c *statsCounter) ResourceUsageDataReceived(rud mpb.ResourceUsageData) {
+func (c *statsCounter) ResourceUsageDataReceived(cd *db.ClientData, rud mpb.ResourceUsageData, v *fspb.ValidationInfo) {
 }
 
 // FRRIntegrationTest spins up a small FRR installation, backed by the provided datastore
-// and exercies it.
+// and exercises it.
 func FRRIntegrationTest(t *testing.T, ds db.Store, tmpDir string) {
 	fin := sertesting.SetServerRetryTime(func(_ uint32) time.Time {
 		return db.Now().Add(time.Second)
@@ -132,7 +131,7 @@ func FRRIntegrationTest(t *testing.T, ds db.Store, tmpDir string) {
 	}
 	defer gms.Stop()
 	go func() {
-		log.Printf("Finished with MasterServer[%v]: %v", tl.Addr(), gms.Serve(tl))
+		log.Infof("Finished with MasterServer[%v]: %v", tl.Addr(), gms.Serve(tl))
 	}()
 
 	// Create FS server certs and server communicator.
@@ -152,7 +151,7 @@ func FRRIntegrationTest(t *testing.T, ds db.Store, tmpDir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	log.Printf("Communicator listening to: %v", listener.Addr())
+	log.Infof("Communicator listening to: %v", listener.Addr())
 
 	// Create authorizer and signers.
 	auth, signs := makeAuthorizerSigners(t)
@@ -198,7 +197,7 @@ func FRRIntegrationTest(t *testing.T, ds db.Store, tmpDir string) {
 	}
 	defer gas.Stop()
 	go func() {
-		log.Printf("Finished with AdminServer[%v]: %v", asl.Addr(), gas.Serve(asl))
+		log.Infof("Finished with AdminServer[%v]: %v", asl.Addr(), gas.Serve(asl))
 	}()
 
 	// Connect the FRR master to the resulting FS AdminInterface.
@@ -225,7 +224,6 @@ func FRRIntegrationTest(t *testing.T, ds db.Store, tmpDir string) {
 
 	// Prepare a general client config.
 	conf := config.Configuration{
-		Ephemeral:    true,
 		TrustedCerts: x509.NewCertPool(),
 		ClientLabels: []*fspb.Label{
 			{ServiceName: "client", Label: "integration_test"},
@@ -257,12 +255,12 @@ func FRRIntegrationTest(t *testing.T, ds db.Store, tmpDir string) {
 		}
 		clients = append(clients, cl)
 	}
-	log.Printf("%v clients started", numClients)
+	log.Infof("%v clients started", numClients)
 
 	// We expect each client to create one response for the hunt.
 	for i := 0; i < numClients; i++ {
 		<-completed
-		log.Printf("%v clients finished", i+1)
+		log.Infof("%v clients finished", i+1)
 	}
 
 	// Now check file handling. Store a file on the server and broadcast a
@@ -278,7 +276,7 @@ func FRRIntegrationTest(t *testing.T, ds db.Store, tmpDir string) {
 	// We expect each client to create one response for the hunt.
 	for i := 0; i < numClients; i++ {
 		<-completed
-		log.Printf("%v clients finished download", i+1)
+		log.Infof("%v clients finished download", i+1)
 	}
 
 	// Shut down everything before reading counters, to avoid even the

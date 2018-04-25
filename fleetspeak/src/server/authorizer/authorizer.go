@@ -43,9 +43,23 @@ type ClientInfo struct {
 // SignatureInfo provides information about a signature included with
 // the contact data.
 type SignatureInfo struct {
-	Certificate *x509.Certificate       // The certificate provided with the signature.
-	Algorithm   x509.SignatureAlgorithm // The signature algorithm used.
-	Valid       bool                    // True if the provided signature could be verified against the public key in Certificate.
+	// The certificate chain provided with the signature.
+	Certificate []*x509.Certificate
+
+	// The signature algorithm used.
+	Algorithm x509.SignatureAlgorithm
+
+	// True if the signature provided with the message could be verified against
+	// the first certificate in the chain.
+	//
+	// NOTE: The FS system only performs, and this bit only represents the result
+	// of a simple signature check against Certificate[0].  The Authorizer
+	// implementation is responsible for verifying every other aspect of chain. In
+	// particular, an Authorizer will typically want to verify that provided
+	// certificates really do chain together, that none of the certificates in it
+	// have been revoked, and that the final certificate in the chain is signed by
+	// a trusted authority.
+	Valid bool
 }
 
 // An Authorizer regulates communication with fleetspeak
@@ -68,7 +82,7 @@ type Authorizer interface {
 	// Allow1 is called when a network connection is opened.
 	//
 	// If it returns true, processing will continue, otherwise the
-	// connection will be immediatly closed.
+	// connection will be immediately closed.
 	Allow1(net.Addr) bool
 
 	// Allow2 is called after basic analysis of the contact has been
@@ -87,7 +101,7 @@ type Authorizer interface {
 	// or equivalent error code.
 	Allow3(net.Addr, ContactInfo, ClientInfo) bool
 
-	// Allow4 is called immediatly before actually saving and
+	// Allow4 is called immediately before actually saving and
 	// processing the messages provided by the client.
 	//
 	// When accept=true, all messages will have their
@@ -95,7 +109,7 @@ type Authorizer interface {
 	// they will be saved and processed. When accept=false,
 	// processing will end, nothing will be saved, and the client
 	// will receive an http 503 or equivalent error code.
-	Allow4(net.Addr, ContactInfo, ClientInfo, []SignatureInfo) (accept bool, validationInfo string)
+	Allow4(net.Addr, ContactInfo, ClientInfo, []SignatureInfo) (accept bool, vi *fspb.ValidationInfo)
 }
 
 // PermissiveAuthorizer is a trival Authorizer which permits all operations.
@@ -111,6 +125,6 @@ func (PermissiveAuthorizer) Allow2(net.Addr, ContactInfo) bool { return true }
 func (PermissiveAuthorizer) Allow3(net.Addr, ContactInfo, ClientInfo) bool { return true }
 
 // Allow4 implements Authorizer.
-func (PermissiveAuthorizer) Allow4(net.Addr, ContactInfo, ClientInfo, []SignatureInfo) (bool, string) {
-	return true, ""
+func (PermissiveAuthorizer) Allow4(net.Addr, ContactInfo, ClientInfo, []SignatureInfo) (bool, *fspb.ValidationInfo) {
+	return true, nil
 }

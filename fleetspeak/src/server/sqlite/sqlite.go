@@ -22,7 +22,7 @@ import (
 	"database/sql"
 	"sync"
 
-	"log"
+	log "github.com/golang/glog"
 
 	// We access the driver through sql.Open, but need to bring in the
 	// dependency.
@@ -43,7 +43,7 @@ type Datastore struct {
 // MakeDatastore opens the given sqlite database file and creates any missing
 // tables.
 func MakeDatastore(fileName string) (*Datastore, error) {
-	log.Printf("Opening sql database: %v", fileName)
+	log.Infof("Opening sql database: %v", fileName)
 	db, err := sql.Open("sqlite3", fileName)
 	if err != nil {
 		return nil, err
@@ -93,11 +93,15 @@ func initDB(db *sql.DB) error {
 
 func initSchema(db *sql.DB) error {
 	for _, s := range []string{
+		`PRAGMA journal_mode = WAL`,
 		`CREATE TABLE IF NOT EXISTS clients(
 client_id TEXT(16) PRIMARY KEY,
 client_key BLOB,
+blacklisted BOOLEAN NOT NULL,
 last_contact_time INT8 NOT NULL,
-last_contact_address TEXT(64))`,
+last_contact_address TEXT(64),
+last_clock_seconds INT8,
+last_clock_nanos INT4)`,
 		`CREATE TABLE IF NOT EXISTS client_labels(
 client_id TEXT(16) NOT NULL,
 service_name TEXT(128) NOT NULL,
@@ -142,7 +146,7 @@ creation_time_seconds INT8 NOT NULL,
 creation_time_nanos INT4 NOT NULL,
 processed_time_seconds INT8,
 processed_time_nanos INT4,
-validation_info TEXT(256),
+validation_info BLOB,
 failed INT1,
 failed_reason TEXT,
 PRIMARY KEY (message_id))`,
@@ -206,7 +210,7 @@ PRIMARY KEY (service, name))
 `,
 	} {
 		if _, err := db.Exec(s); err != nil {
-			log.Printf("Error [%v] creating table: \n%v", err, s)
+			log.Errorf("Error [%v] creating table: \n%v", err, s)
 			return err
 		}
 	}

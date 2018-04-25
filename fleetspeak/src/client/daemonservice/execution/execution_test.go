@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"log"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/google/fleetspeak/fleetspeak/src/client/channel"
@@ -44,18 +44,11 @@ func testClient() string {
 func TestFailures(t *testing.T) {
 	prevMagicTimeout := channel.MagicTimeout
 	prevMessageTimeout := channel.MessageTimeout
-	prevMaxStatsSamplePeriod := MaxStatsSamplePeriod
-	prevSampleSize := StatsSampleSize
 	channel.MagicTimeout = 5 * time.Second
 	channel.MessageTimeout = 5 * time.Second
-	// Set freq to a large value so resource-usage data can be computed after the process is finished.
-	MaxStatsSamplePeriod = 1 * time.Hour
-	StatsSampleSize = 1
 	defer func() {
 		channel.MagicTimeout = prevMagicTimeout
 		channel.MessageTimeout = prevMessageTimeout
-		MaxStatsSamplePeriod = prevMaxStatsSamplePeriod
-		StatsSampleSize = prevSampleSize
 	}()
 
 	sc := clitesting.MockServiceContext{
@@ -77,31 +70,11 @@ func TestFailures(t *testing.T) {
 		if err != nil {
 			t.Fatalf("execution.New returned error: %v", err)
 		}
-		log.Printf("started %s on %p", mode, ex)
+		log.Infof("started %s on %p", mode, ex)
 		// This should close to indicate we gave up waiting and the execution is over.
 		<-ex.Done
 		close(ex.Out)
 		ex.Wait()
-		// A ResourceUsage is sent at shutdown, so there should be at least one.
-		for {
-			m := <-sc.OutChan
-			if m.MessageType == "StdOutput" {
-				continue
-			}
-			if m.MessageType != "ResourceUsage" {
-				t.Errorf("Expected final ResourceUsage message, got: %v", m)
-				break
-			}
-			var rd mpb.ResourceUsageData
-			if err := ptypes.UnmarshalAny(m.Data, &rd); err != nil {
-				t.Errorf("Unable to unmarshal ResourceUsageData: %v", err)
-				break
-			}
-			if rd.ResourceUsage == nil || rd.ResourceUsage.MeanResidentMemory <= 0.0 {
-				t.Errorf("Expected mean_resident_memory to be >0 , got: %v", rd)
-			}
-			break
-		}
 	}
 }
 
@@ -158,6 +131,10 @@ func TestStd(t *testing.T) {
 	}
 	dsc := &dspb.Config{
 		Argv: []string{testClient(), "--mode=stdSpam"},
+		StdParams: &dspb.Config_StdParams{
+			ServiceName:      "TestService",
+			FlushTimeSeconds: 5,
+		},
 	}
 	if d := os.Getenv("TEST_UNDECLARED_OUTPUTS_DIR"); d != "" {
 		dsc.Argv = append(dsc.Argv, "--log_dir="+d)
@@ -199,10 +176,11 @@ func TestStd(t *testing.T) {
 	}
 
 	// Flushes should happen when the buffer is full. The last flush might take up
-	// to outFlushTime to occur, the rest should occur quickly.
+	// to 5 seconds occur, the rest should occur quickly.
 	runtime := time.Since(start)
-	if runtime > 2*outFlushTime {
-		t.Errorf("took %v to receive std data, should be less than %v", runtime, 2*outFlushTime)
+	deadline := 10 * time.Second
+	if runtime > deadline {
+		t.Errorf("took %v to receive std data, should be less than %v", runtime, deadline)
 	}
 
 	if !bytes.Equal(bufIn.Bytes(), wantIn) {
@@ -214,20 +192,13 @@ func TestStd(t *testing.T) {
 }
 
 func TestStats(t *testing.T) {
-	prevMaxStatsSamplePeriod := MaxStatsSamplePeriod
-	prevSampleSize := StatsSampleSize
-	MaxStatsSamplePeriod = 20 * time.Millisecond
-	StatsSampleSize = 5
-	defer func() {
-		MaxStatsSamplePeriod = prevMaxStatsSamplePeriod
-		StatsSampleSize = prevSampleSize
-	}()
-
 	sc := clitesting.MockServiceContext{
 		OutChan: make(chan *fspb.Message, 2000),
 	}
 	dsc := &dspb.Config{
 		Argv: []string{testClient(), "--mode=loopback"},
+		ResourceMonitoringSampleSize:          2,
+		ResourceMonitoringSamplePeriodSeconds: 1,
 	}
 	if d := os.Getenv("TEST_UNDECLARED_OUTPUTS_DIR"); d != "" {
 		dsc.Argv = append(dsc.Argv, "--log_dir="+d)
@@ -237,10 +208,12 @@ func TestStats(t *testing.T) {
 		t.Fatalf("execution.New returned error: %v", err)
 	}
 
+	// Run TestService for 4.2 seconds. We expect a resource-usage
+	// report to be sent every 2000 milliseconds (samplePeriod * sampleSize).
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < 50; i++ {
-			time.Sleep(10 * time.Millisecond)
+		for i := 0; i < 42; i++ {
+			time.Sleep(100 * time.Millisecond)
 			m := fspb.Message{
 				MessageId:   []byte{byte(i)},
 				MessageType: "DummyMessage",
@@ -252,37 +225,50 @@ func TestStats(t *testing.T) {
 		close(done)
 	}()
 
-	cnt := 0
-	for cnt < 5 {
-		m := <-sc.OutChan
-		if m.MessageType == "DummyMessageResponse" {
-			continue
-		}
-		if m.MessageType != "ResourceUsage" {
-			t.Errorf("Received unexpected message type: %s", m.MessageType)
-			continue
-		}
-		var rud mpb.ResourceUsageData
-		if err := ptypes.UnmarshalAny(m.Data, &rud); err != nil {
-			t.Fatalf("Unable to unmarshal ResourceUsageData: %v", err)
-		}
-		ru := rud.ResourceUsage
-		if ru == nil {
-			t.Error("ResourceUsageData should have non-nil ResourceUsage")
-			break
-		}
-		if ru.MeanResidentMemory <= 0.0 {
-			t.Errorf("ResourceUsage.MeanResidentMemory should be >0, got: %d", ru.MeanResidentMemory)
-			break
-		}
-		cnt++
-	}
-	for {
+	ruCnt := 0
+	finalRUReceived := false
+
+	for !finalRUReceived {
 		select {
 		case <-done:
 			ex.Wait()
 			return
-		case <-sc.OutChan:
+		case m := <-sc.OutChan:
+			if m.MessageType == "DummyMessageResponse" {
+				continue
+			}
+			if m.MessageType != "ResourceUsage" {
+				t.Errorf("Received unexpected message type: %s", m.MessageType)
+				continue
+			}
+			var rud mpb.ResourceUsageData
+			if err := ptypes.UnmarshalAny(m.Data, &rud); err != nil {
+				t.Fatalf("Unable to unmarshal ResourceUsageData: %v", err)
+			}
+			ruCnt++
+			if rud.ProcessTerminated {
+				finalRUReceived = true
+				continue
+			}
+			ru := rud.ResourceUsage
+			if ru == nil {
+				t.Error("ResourceUsageData should have non-nil ResourceUsage")
+				continue
+			}
+			if ru.MeanResidentMemory <= 0.0 {
+				t.Errorf("ResourceUsage.MeanResidentMemory should be >0, got: %.2f", ru.MeanResidentMemory)
+				continue
+			}
 		}
+	}
+
+	if !finalRUReceived {
+		t.Error("Last resource-usage report from finished process was not received.")
+	}
+
+	// We expect floor(4200 / 2000) regular resource-usage reports, plus the last one sent after
+	// the process terminates.
+	if ruCnt != 3 {
+		t.Errorf("Unexpected number of resource-usage reports received. Got %d. Want 3.", ruCnt)
 	}
 }

@@ -18,6 +18,7 @@ package dbtesting
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"io/ioutil"
 	"reflect"
@@ -25,8 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 
@@ -147,11 +147,7 @@ func storeGetMessagesTest(t *testing.T, ms db.Store) {
 	fakeTime.SetSeconds(84)
 
 	for _, i := range idPairs {
-		if err := ms.StoreMessages(ctx, []*fspb.Message{
-			{
-				MessageId: i.mid.Bytes(),
-				Result:    &fspb.MessageResult{ProcessedTime: db.NowProto()},
-			}}, ""); err != nil {
+		if err := ms.SetMessageResult(ctx, i.cid, i.mid, &fspb.MessageResult{ProcessedTime: db.NowProto()}); err != nil {
 			t.Errorf("Unable to mark message %v as processed: %v", i, err)
 		}
 	}
@@ -212,7 +208,6 @@ func clientMessagesForProcessingTest(t *testing.T, ms db.Store) {
 	stored := fspb.Message{
 		MessageId: mid2.Bytes(),
 		Source: &fspb.Address{
-			ClientId:    []byte(""),
 			ServiceName: "TestServiceName",
 		},
 		SourceMessageId: []byte("omid 2"),
@@ -221,7 +216,7 @@ func clientMessagesForProcessingTest(t *testing.T, ms db.Store) {
 			ServiceName: "TestServiceName",
 		},
 		CreationTime:   db.NowProto(),
-		ValidationInfo: "Valid",
+		ValidationInfo: &fspb.ValidationInfo{Tags: map[string]string{"result": "Valid"}},
 	}
 	err := ms.StoreMessages(ctx, []*fspb.Message{&stored}, "")
 	if err != nil {
@@ -234,7 +229,7 @@ func clientMessagesForProcessingTest(t *testing.T, ms db.Store) {
 	if err != nil {
 		t.Fatalf("ClientMessagesForProcessing(%v) returned error: %v", clientID, err)
 	}
-	log.Printf("Retrieved: %v", m)
+	log.Infof("Retrieved: %v", m)
 	if len(m) != 1 {
 		t.Errorf("ClientMessageForProcessing(%v) didn't return one message: %v", clientID, m)
 	}
@@ -265,7 +260,11 @@ func storeMessagesTest(t *testing.T, ms db.Store) {
 	if err := ms.AddClient(ctx, clientID3, &db.ClientData{Key: []byte("test key")}); err != nil {
 		t.Fatalf("AddClient [%v] failed: %v", clientID3, err)
 	}
-	contact, err := ms.RecordClientContact(ctx, clientID3, 42, 43, "127.0.0.1")
+	contact, err := ms.RecordClientContact(ctx, db.ContactData{
+		ClientID:      clientID3,
+		NonceSent:     42,
+		NonceReceived: 43,
+		Addr:          "127.0.0.1"})
 	if err != nil {
 		t.Fatalf("RecordClientContact failed: %v", err)
 	}
@@ -279,10 +278,10 @@ func storeMessagesTest(t *testing.T, ms db.Store) {
 		{
 			MessageId: newID.Bytes(),
 			Source: &fspb.Address{
+				ClientId:    clientID3.Bytes(),
 				ServiceName: "TestServiceName",
 			},
 			Destination: &fspb.Address{
-				ClientId:    clientID3.Bytes(),
 				ServiceName: "TestServiceName",
 			},
 			MessageType:  "Test message type",
@@ -294,10 +293,10 @@ func storeMessagesTest(t *testing.T, ms db.Store) {
 		{
 			MessageId: processedID.Bytes(),
 			Source: &fspb.Address{
+				ClientId:    clientID3.Bytes(),
 				ServiceName: "TestServiceName",
 			},
 			Destination: &fspb.Address{
-				ClientId:    clientID3.Bytes(),
 				ServiceName: "TestServiceName",
 			},
 			MessageType:  "Test message type",
@@ -310,10 +309,10 @@ func storeMessagesTest(t *testing.T, ms db.Store) {
 		{
 			MessageId: erroredID.Bytes(),
 			Source: &fspb.Address{
+				ClientId:    clientID3.Bytes(),
 				ServiceName: "TestServiceName",
 			},
 			Destination: &fspb.Address{
-				ClientId:    clientID3.Bytes(),
 				ServiceName: "TestServiceName",
 			},
 			MessageType:  "Test message type",
@@ -331,17 +330,17 @@ func storeMessagesTest(t *testing.T, ms db.Store) {
 	checkResults(t, ms,
 		map[common.MessageID]*fspb.MessageResult{
 			newID: nil,
-			processedID: &fspb.MessageResult{
+			processedID: {
 				ProcessedTime: &tpb.Timestamp{Seconds: 42, Nanos: 20000}},
-			erroredID: &fspb.MessageResult{
+			erroredID: {
 				ProcessedTime: &tpb.Timestamp{Seconds: 42},
 				Failed:        true,
 				FailedReason:  "broken test message",
 			},
 		})
 
-	// Now run StoreMessagesFromClient again, modeling that they were all resent,
-	// and that this time all processing completed.
+	// StoreMessages again, modeling that they were all resent, and that this time
+	// all processing completed.
 	for _, m := range msgs {
 		m.CreationTime = &tpb.Timestamp{Seconds: 52}
 		m.Result = &fspb.MessageResult{ProcessedTime: &tpb.Timestamp{Seconds: 52}}
@@ -353,13 +352,12 @@ func storeMessagesTest(t *testing.T, ms db.Store) {
 
 	checkResults(t, ms,
 		map[common.MessageID]*fspb.MessageResult{
-			newID: &fspb.MessageResult{
+			newID: {
 				ProcessedTime: &tpb.Timestamp{Seconds: 52}},
-			processedID: &fspb.MessageResult{
-				ProcessedTime: &tpb.Timestamp{Seconds: 42, Nanos: 20000}},
-			erroredID: &fspb.MessageResult{
-				ProcessedTime: &tpb.Timestamp{Seconds: 52},
-			},
+			processedID: {
+				ProcessedTime: &tpb.Timestamp{Seconds: 52}},
+			erroredID: {
+				ProcessedTime: &tpb.Timestamp{Seconds: 52}},
 		})
 }
 
@@ -425,11 +423,7 @@ func registerMessageProcessorTest(t *testing.T, ms db.MessageStore) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := ms.StoreMessages(ctx, []*fspb.Message{
-			{
-				MessageId: mid.Bytes(),
-				Result:    &fspb.MessageResult{ProcessedTime: db.NowProto()},
-			}}, ""); err != nil {
+		if err := ms.SetMessageResult(ctx, common.ClientID{}, mid, &fspb.MessageResult{ProcessedTime: db.NowProto()}); err != nil {
 			t.Errorf("Unable to mark message as processed: %v", err)
 		}
 	}
@@ -578,8 +572,14 @@ func ClientStoreTest(t *testing.T, ds db.Store) {
 			}
 		}
 	}
-
-	contactID, err := ds.RecordClientContact(ctx, clientID, 42, 54, "[ABCD:ABCD:ABCD:ABCD:ABCD:ABCD:192.168.123.123]:65535")
+	longAddr := "[ABCD:ABCD:ABCD:ABCD:ABCD:ABCD:192.168.123.123]:65535"
+	contactID, err := ds.RecordClientContact(ctx, db.ContactData{
+		ClientID:      clientID,
+		NonceSent:     42,
+		NonceReceived: 54,
+		Addr:          longAddr,
+		ClientClock:   &tpb.Timestamp{Seconds: 21},
+	})
 	if err != nil {
 		t.Errorf("unexpected error for RecordClientContact: %v", err)
 	}
@@ -646,7 +646,8 @@ func ClientStoreTest(t *testing.T, ds db.Store) {
 			},
 		},
 		LastContactTime:    &tpb.Timestamp{Seconds: 84},
-		LastContactAddress: "[ABCD:ABCD:ABCD:ABCD:ABCD:ABCD:192.168.123.123]:65535",
+		LastContactAddress: longAddr,
+		LastClock:          &tpb.Timestamp{Seconds: 21},
 	}
 
 	labelSorter{got.Labels}.Sort()
@@ -654,6 +655,23 @@ func ClientStoreTest(t *testing.T, ds db.Store) {
 
 	if !proto.Equal(want, got) {
 		t.Errorf("ListClients error: want [%v] got [%v]", want, got)
+	}
+
+	contacts, err := ds.ListClientContacts(ctx, clientID)
+	if err != nil {
+		t.Errorf("ListClientContacts returned error: %v", err)
+	}
+	if len(contacts) != 1 {
+		t.Errorf("ListClientContacts returned %d results, expected 1.", len(contacts))
+	} else {
+		if contacts[0].SentNonce != 42 || contacts[0].ReceivedNonce != 54 {
+			t.Errorf("ListClientContact[0] should return nonces (42, 54), got (%d, %d)",
+				contacts[0].SentNonce, contacts[0].ReceivedNonce)
+		}
+		if contacts[0].ObservedAddress != longAddr {
+			t.Errorf("ListClientContact[0] should return address %s, got %s",
+				longAddr, contacts[0].ObservedAddress)
+		}
 	}
 
 	meanRAM, maxRAM := 190, 200
@@ -709,6 +727,24 @@ func ClientStoreTest(t *testing.T, ds db.Store) {
 
 	if got, want := record, expected; !proto.Equal(got, want) {
 		t.Errorf("Resource-usage record returned is different from what we expect; got:\n%q\nwant:\n%q", got, want)
+	}
+
+	if err := ds.BlacklistClient(ctx, clientID); err != nil {
+		t.Errorf("Error blacklisting client: %v", err)
+	}
+	g, err := ds.GetClientData(ctx, clientID)
+	if err != nil {
+		t.Errorf("Error getting client data after blacklisting: %v", err)
+	}
+	w := &db.ClientData{
+		Key: key,
+		Labels: []*fspb.Label{
+			{ServiceName: "system", Label: "Windows"},
+			{ServiceName: "system", Label: "new label"}},
+		Blacklisted: true,
+	}
+	if !clientDataEqual(g, w) {
+		t.Errorf("Got %+v want %+v after blacklisting client.", g, w)
 	}
 }
 
@@ -914,23 +950,30 @@ func BroadcastStoreTest(t *testing.T, ds db.Store) {
 
 func listClientsTest(t *testing.T, ds db.Store) {
 	ctx := context.Background()
+	if err := ds.BlacklistClient(ctx, clientID3); err != nil {
+		t.Errorf("Unable to blacklist client: %v", err)
+	}
 Cases:
 	for _, tc := range []struct {
-		name string
-		ids  []common.ClientID
-		want map[common.ClientID]bool
+		name            string
+		ids             []common.ClientID
+		want            map[common.ClientID]bool
+		wantBlacklisted map[common.ClientID]bool
 	}{
 		{
-			ids:  nil,
-			want: map[common.ClientID]bool{clientID: true, clientID2: true, clientID3: true},
+			ids:             nil,
+			want:            map[common.ClientID]bool{clientID: true, clientID2: true, clientID3: true},
+			wantBlacklisted: map[common.ClientID]bool{clientID3: true},
 		},
 		{
-			ids:  []common.ClientID{clientID},
-			want: map[common.ClientID]bool{clientID: true},
+			ids:             []common.ClientID{clientID},
+			want:            map[common.ClientID]bool{clientID: true},
+			wantBlacklisted: map[common.ClientID]bool{},
 		},
 		{
-			ids:  []common.ClientID{clientID, clientID2},
-			want: map[common.ClientID]bool{clientID: true, clientID2: true},
+			ids:             []common.ClientID{clientID, clientID2},
+			want:            map[common.ClientID]bool{clientID: true, clientID2: true},
+			wantBlacklisted: map[common.ClientID]bool{},
 		},
 	} {
 		clients, err := ds.ListClients(ctx, tc.ids)
@@ -939,6 +982,7 @@ Cases:
 			continue Cases
 		}
 		got := make(map[common.ClientID]bool)
+		gotBlacklisted := make(map[common.ClientID]bool)
 		for _, c := range clients {
 			id, err := common.BytesToClientID(c.ClientId)
 			if err != nil {
@@ -948,9 +992,15 @@ Cases:
 				t.Errorf("ListClients(%v) returned nil LastContactTime.", tc.ids)
 			}
 			got[id] = true
+			if c.Blacklisted {
+				gotBlacklisted[id] = true
+			}
 		}
 		if !reflect.DeepEqual(tc.want, got) {
 			t.Errorf("ListClients(%v) returned unexpected set of clients, want [%v], got[%v]", tc.ids, tc.want, got)
+		}
+		if !reflect.DeepEqual(tc.wantBlacklisted, gotBlacklisted) {
+			t.Errorf("ListClients(%v) returned unexpected set of blacklisted clients, want [%v], got[%v]", tc.ids, tc.wantBlacklisted, gotBlacklisted)
 		}
 	}
 }

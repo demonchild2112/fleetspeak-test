@@ -26,13 +26,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"os"
-	"path"
 	"sync"
 	"time"
 
-	"log"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"github.com/google/fleetspeak/fleetspeak/src/client/config"
 	"github.com/google/fleetspeak/fleetspeak/src/common"
@@ -71,18 +68,14 @@ func StartManager(cfg *config.Configuration, configChanges chan<- *fspb.ClientIn
 		return nil, errors.New("configuration must be provided")
 	}
 
+	if cfg.PersistenceHandler == nil {
+		log.Warning("PersistenceHandler not provided. Using NoopPersistenceHandler.")
+		cfg.PersistenceHandler = config.NewNoopPersistenceHandler()
+	}
+
 	for _, l := range cfg.ClientLabels {
 		if l.ServiceName != "client" || l.Label == "" {
 			return nil, fmt.Errorf("invalid client label: %v", l)
-		}
-	}
-
-	if cfg.ConfigurationPath == "" {
-		if !cfg.Ephemeral {
-			return nil, errors.New("no configuration path provided, but Ephemeral=false")
-		}
-		if cfg.FixedServices == nil {
-			return nil, errors.New("no configuration path provided, but FixedServices=nil")
 		}
 	}
 
@@ -92,6 +85,7 @@ func StartManager(cfg *config.Configuration, configChanges chan<- *fspb.ClientIn
 
 		state:           &clpb.ClientState{},
 		revokedSerials:  make(map[string]bool),
+		dirty:           true,
 		runningServices: make(map[string][]byte),
 
 		configChanges: configChanges,
@@ -101,25 +95,16 @@ func StartManager(cfg *config.Configuration, configChanges chan<- *fspb.ClientIn
 		r.cc = &clpb.CommunicatorConfig{}
 	}
 
-	if !cfg.Ephemeral {
-		i, err := os.Stat(cfg.ConfigurationPath)
-		if err != nil {
-			return nil, fmt.Errorf("unable to stat config directory [%v]: %v", cfg.ConfigurationPath, err)
-		}
-		if !i.Mode().IsDir() {
-			return nil, fmt.Errorf("config directory path [%v] is not a directory", cfg.ConfigurationPath)
-		}
-		r.writebackPath = path.Join(cfg.ConfigurationPath, "writeback")
-		if err := r.readWriteback(); err != nil {
-			log.Printf("initial load of writeback failed (continuing): %v", err)
-			r.state = &clpb.ClientState{}
-		}
+	var err error
+	if r.state, err = cfg.PersistenceHandler.ReadState(); err != nil {
+		log.Errorf("initial load of writeback failed (continuing): %v", err)
+		r.state = &clpb.ClientState{}
 	}
-
+	r.AddRevokedSerials(r.state.RevokedCertSerials)
 	r.AddRevokedSerials(cfg.RevokedCertSerials)
 
 	if r.state.ClientKey == nil {
-		if err := r.rekey(); err != nil {
+		if err := r.Rekey(); err != nil {
 			return nil, fmt.Errorf("no key present, and %v", err)
 		}
 	} else {
@@ -131,25 +116,30 @@ func StartManager(cfg *config.Configuration, configChanges chan<- *fspb.ClientIn
 		if err != nil {
 			return nil, fmt.Errorf("unable to create clientID: %v", err)
 		}
-		log.Printf("Using client id: %v (Escaped: %q, Octal: %o)", r.id, r.id.Bytes(), r.id.Bytes())
+		log.Infof("Using client id: %v (Escaped: %q, Octal: %o)", r.id, r.id.Bytes(), r.id.Bytes())
 	}
 
-	r.readCommunicatorConfig()
-
-	if !r.cfg.Ephemeral {
-		r.dirty = true
-		if err := r.Sync(); err != nil {
-			return nil, fmt.Errorf("unable to write initial Writeback[%v]: %v", r.writebackPath, err)
+	if cc, err := cfg.PersistenceHandler.ReadCommunicatorConfig(); err == nil {
+		if cc != nil {
+			r.cc = cc
 		}
-		r.syncTicker = time.NewTicker(time.Minute)
-		r.done = make(chan bool)
-		go r.syncLoop()
+	} else {
+		log.Errorf("Error reading communicator config, ignoring: %v", err)
 	}
+
+	if err := r.Sync(); err != nil {
+		return nil, fmt.Errorf("unable to write initial writeback: %v", err)
+	}
+	r.syncTicker = time.NewTicker(time.Minute)
+	r.done = make(chan bool)
+	go r.syncLoop()
+
 	return &r, nil
 }
 
-func (m *Manager) rekey() error {
-	k, err := ecdsa.GenerateKey(elliptic.P521(), rand.Reader)
+// Rekey creates a new private key and identity for the client.
+func (m *Manager) Rekey() error {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("unable to generate new key: %v", err)
 	}
@@ -168,84 +158,29 @@ func (m *Manager) rekey() error {
 	m.dirty = true
 	m.lock.Unlock()
 
-	log.Printf("Using new client id: %v (Escaped: %q, Octal: %o)", id, id.Bytes(), id.Bytes())
+	log.Infof("Using new client id: %v (Escaped: %q, Octal: %o)", id, id.Bytes(), id.Bytes())
 
 	return nil
 }
 
-// Sync writes the current dynamic state to the writeback file. This saves the
-// current state, so changing data (e.g. the deduplication nonces) is persisted
-// across restarts.
+// Sync writes the current dynamic state to the writeback location. This saves the current state, so changing data (e.g. the deduplication nonces) is persisted across restarts.
 func (m *Manager) Sync() error {
-	if m.cfg.Ephemeral {
-		return nil
-	}
 	m.lock.RLock()
-	p := m.writebackPath
 	d := m.dirty
 	m.lock.RUnlock()
-
-	if p == "" || !d {
+	if !d {
 		return nil
 	}
-
-	tmp := p + ".new"
-	os.RemoveAll(tmp)
 
 	m.lock.Lock()
 	defer m.lock.Unlock()
-	bytes, err := proto.Marshal(m.state)
-	if err != nil {
-		log.Fatalf("Unable to serialize writeback: %v", err)
+
+	if err := m.cfg.PersistenceHandler.WriteState(m.state); err != nil {
+		return fmt.Errorf("Failed to sync state to writeback: %v", err)
 	}
-	if err := ioutil.WriteFile(tmp, bytes, 0600); err != nil {
-		return fmt.Errorf("unable to write new configuration: %v", err)
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		return fmt.Errorf("unable to rename new confguration: %v", err)
-	}
+
 	m.dirty = false
 	return nil
-}
-
-func (m *Manager) readWriteback() error {
-	b, err := ioutil.ReadFile(m.writebackPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-
-	m.state = &clpb.ClientState{}
-	if err := proto.Unmarshal(b, m.state); err != nil {
-		m.state = nil
-		return fmt.Errorf("unable to parse writeback file: %v", err)
-	}
-	m.AddRevokedSerials(m.state.RevokedCertSerials)
-
-	return nil
-}
-
-func (m *Manager) readCommunicatorConfig() {
-	if m.cfg.ConfigurationPath == "" {
-		return
-	}
-	p := path.Join(m.cfg.ConfigurationPath, "communicator.txt")
-	b, err := ioutil.ReadFile(p)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("Error reading communicator config [%s], ignoring: %v", p, err)
-		}
-		return
-	}
-
-	var cc clpb.CommunicatorConfig
-	if err := proto.UnmarshalText(string(b), &cc); err != nil {
-		log.Printf("Error parsing communicator config [%s], ignoring: %v", p, err)
-		return
-	}
-	m.cc = &cc
 }
 
 // AddRevokedSerials takes a list of revoked certificate serial numbers and adds

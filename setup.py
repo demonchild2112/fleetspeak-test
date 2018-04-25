@@ -18,7 +18,7 @@ Forked from https://github.com/pypa/sampleproject/blob/master/setup.py .
 """
 
 # Always prefer setuptools over distutils
-from setuptools import setup
+from setuptools import setup, find_packages
 
 setup(
     name='fleetspeak',
@@ -26,13 +26,19 @@ setup(
     # Versions should comply with PEP440.  For a discussion on single-sourcing
     # the version across setup.py and the project code, see
     # https://packaging.python.org/en/latest/single_source_version.html
-    version='0.0.1',
+    version='0.0.7',
 
-    description='',
-    long_description='',
+    description='Fleetspeak',
+    long_description=(
+        'Fleetspeak is a framework for communicating with a fleet of '
+        'machines, with a focus on security monitoring and basic '
+        'administrative use cases. It is a subproject of GRR ( '
+        'https://github.com/google/grr/blob/master/README.md ), and can be '
+        'seen as an effort to modularizing and modernizing its communication '
+        'mechanism.'),
 
     # The project's main homepage.
-    url='https://github.com',
+    url='https://github.com/google/fleetspeak',
 
     # Author details
     author='',
@@ -47,7 +53,7 @@ setup(
         #   3 - Alpha
         #   4 - Beta
         #   5 - Production/Stable
-        'Development Status :: 3 - Alpha',
+        'Development Status :: 4 - Beta',
 
         # Indicate who your project is intended for
         'Intended Audience :: Developers',
@@ -66,7 +72,7 @@ setup(
 
     # You can just specify the packages manually here if your project is
     # simple. Or you can use find_packages().
-    packages=['fleetspeak'],
+    packages=find_packages(),
 
     # Alternatively, if you want to distribute just a my_module.py, uncomment
     # this:
@@ -77,12 +83,12 @@ setup(
     # requirements files see:
     # https://packaging.python.org/en/latest/requirements.html
     install_requires=[
-        'futures',
-        'google-apputils',
-        'grpcio',
-        'grpcio-tools',
-        'python-gflags',
-        'six',
+        'futures==3.2.0',
+        'google-apputils==0.4.2',
+        'grpcio==1.7.0',
+        'grpcio-tools==1.7.0',
+        'python-gflags==3.1.2',
+        'six==1.11.0',
     ],
 
     # List additional groups of dependencies here (e.g. development

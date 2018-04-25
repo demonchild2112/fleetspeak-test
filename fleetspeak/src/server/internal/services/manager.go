@@ -16,19 +16,20 @@
 package services
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"golang.org/x/time/rate"
 
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/server/db"
+	"github.com/google/fleetspeak/fleetspeak/src/server/internal/cache"
 	"github.com/google/fleetspeak/fleetspeak/src/server/internal/ftime"
 	"github.com/google/fleetspeak/fleetspeak/src/server/service"
 	"github.com/google/fleetspeak/fleetspeak/src/server/stats"
@@ -43,15 +44,17 @@ type Manager struct {
 	dataStore       db.Store
 	serviceRegistry map[string]service.Factory // Used to look up the correct factory when configuring services.
 	stats           stats.Collector
+	cc              *cache.Clients
 }
 
 // NewManager creates a new manager using the provided components. Initially it only contains the 'system' service.
-func NewManager(dataStore db.Store, serviceRegistry map[string]service.Factory, stats stats.Collector) *Manager {
+func NewManager(dataStore db.Store, serviceRegistry map[string]service.Factory, stats stats.Collector, clientCache *cache.Clients) *Manager {
 	m := Manager{
 		services:        make(map[string]*liveService),
 		dataStore:       dataStore,
 		serviceRegistry: serviceRegistry,
 		stats:           stats,
+		cc:              clientCache,
 	}
 
 	ssd := liveService{
@@ -60,7 +63,12 @@ func NewManager(dataStore db.Store, serviceRegistry map[string]service.Factory, 
 		maxParallelism: 100,
 		pLogLimiter:    rate.NewLimiter(rate.Every(10*time.Second), 1),
 	}
-	ss := systemService{sctx: &ssd, stats: stats, datastore: dataStore}
+	ss := systemService{
+		sctx:      &ssd,
+		stats:     stats,
+		datastore: dataStore,
+		cc:        clientCache,
+	}
 	ssd.service = &ss
 	m.services["system"] = &ssd
 	ss.Start(&ssd)
@@ -108,7 +116,7 @@ func (c *Manager) Install(cfg *spb.ServiceConfig) error {
 	}
 	c.services[cfg.Name] = &d
 
-	log.Printf("Installed %v service.", cfg.Name)
+	log.Infof("Installed %v service.", cfg.Name)
 	return nil
 }
 
@@ -118,13 +126,6 @@ func (c *Manager) Stop() {
 		d.stop()
 	}
 	c.services = map[string]*liveService{}
-}
-
-func pSize(m *fspb.Message) int {
-	if m.Data == nil {
-		return 0
-	}
-	return len(m.Data.Value)
 }
 
 // ProcessMessages implements MessageProcessor and is called by the datastore on
@@ -139,12 +140,12 @@ func (c *Manager) ProcessMessages(msgs []*fspb.Message) {
 
 	for idx, msg := range msgs {
 		i, m := idx, msg
-		c.stats.MessageIngested(m.Destination.ServiceName, m.MessageType, true, pSize(m))
+		c.stats.MessageIngested(true, m)
 		go func() {
 			defer working.Done()
 			l := c.services[m.Destination.ServiceName]
 			if l == nil {
-				log.Printf("Message in datastore [%v] is for unknown service [%s].", hex.EncodeToString(m.MessageId), m.Destination.ServiceName)
+				log.Errorf("Message in datastore [%v] is for unknown service [%s].", hex.EncodeToString(m.MessageId), m.Destination.ServiceName)
 				return
 			}
 			res := l.processMessage(ctx, m)
@@ -169,7 +170,7 @@ func (c *Manager) ProcessMessages(msgs []*fspb.Message) {
 	ctx, fin = context.WithTimeout(context.Background(), 15*time.Second)
 	defer fin()
 	if err := c.dataStore.StoreMessages(ctx, toSave, ""); err != nil {
-		log.Printf("Error saving results for %d messages: %v", len(toSave), err)
+		log.Errorf("Error saving results for %d messages: %v", len(toSave), err)
 	}
 }
 
@@ -183,7 +184,7 @@ func (s *liveService) processMessage(ctx context.Context, m *fspb.Message) *fspb
 	defer atomic.AddUint32(&s.parallelism, ^uint32(0))
 	if p > s.maxParallelism {
 		if s.pLogLimiter.Allow() {
-			log.Printf("%s: Overloaded with %d concurrent messages, dropping excess, will retry.", s.name, s.maxParallelism)
+			log.Warningf("%s: Overloaded with %d concurrent messages, dropping excess, will retry.", s.name, s.maxParallelism)
 		}
 		s.manager.stats.MessageDropped(s.name, m.MessageType)
 		return nil
@@ -203,11 +204,11 @@ func (s *liveService) processMessage(ctx context.Context, m *fspb.Message) *fspb
 		return &fspb.MessageResult{ProcessedTime: db.NowProto()}
 	case service.IsTemporary(e):
 		s.manager.stats.MessageErrored(start, ftime.Now(), s.name, m.MessageType, true)
-		log.Printf("%s: Temporary error processing message %v, will retry: %v", s.name, mid, e)
+		log.Warningf("%s: Temporary error processing message %v, will retry: %v", s.name, mid, e)
 		return nil
 	case !service.IsTemporary(e):
 		s.manager.stats.MessageErrored(start, ftime.Now(), s.name, m.MessageType, false)
-		log.Printf("%s: Permanent error processing message %v, giving up: %v", s.name, mid, e)
+		log.Errorf("%s: Permanent error processing message %v, giving up: %v", s.name, mid, e)
 		return &fspb.MessageResult{
 			ProcessedTime: db.NowProto(),
 			Failed:        true,
@@ -229,32 +230,20 @@ func (c *Manager) HandleNewMessages(ctx context.Context, msgs []*fspb.Message, c
 			return fmt.Errorf("HandleNewMessage called with bad Destination: %v", m.Destination)
 		}
 		m.CreationTime = now
-		c.stats.MessageIngested(m.Destination.ServiceName, m.MessageType, false, pSize(m))
+		c.stats.MessageIngested(false, m)
 	}
 
-	// savedL is held exclusivly while msgs are being saved, non-exclusively while
-	// a result field of msgs is being updated.
-	var savedL sync.RWMutex
-
-	// Current number of active messages. Atomically decremented as processing completed.
-	active := uint64(len(msgs))
-
-	// Closed when all processing attempts have finished.
-	done := make(chan struct{})
-
+	// Try to processes all the messages in parallel, with a 30 second timeout.
 	ctx1, fin1 := context.WithTimeout(ctx, 30*time.Second)
-
+	var wg sync.WaitGroup
+	wg.Add(len(msgs))
 	for _, msg := range msgs {
 		m := msg
 		go func() {
-			defer func() {
-				if 0 == atomic.AddUint64(&active, ^uint64(0)) {
-					close(done)
-				}
-			}()
+			defer wg.Done()
 			l := c.services[m.Destination.ServiceName]
 			if l == nil {
-				log.Printf("Received new message [%v] for unknown service [%s].", hex.EncodeToString(m.MessageId), m.Destination.ServiceName)
+				log.Errorf("Received new message [%v] for unknown service [%s].", hex.EncodeToString(m.MessageId), m.Destination.ServiceName)
 				return
 			}
 
@@ -262,51 +251,29 @@ func (c *Manager) HandleNewMessages(ctx context.Context, msgs []*fspb.Message, c
 			if res == nil {
 				return
 			}
-			savedL.RLock()
 			m.Result = res
 			m.Data = nil
-			savedL.RUnlock()
 		}()
 	}
-
-	// Wait up to 1 second for messages to process.
-	t := time.NewTimer(time.Second)
-	select {
-	case <-t.C:
-		// 1 second passed: save all messages, report results, continue waiting
-		savedL.Lock()
-		for _, m := range msgs {
-			var s int
-			if m.Data != nil {
-				s = len(m.Data.TypeUrl) + len(m.Data.Value)
-			}
-			c.stats.MessageSaved(m.Destination.ServiceName, m.MessageType, false, s)
-		}
-		ctx2, fin2 := context.WithTimeout(ctx, 30*time.Second)
-		if err := c.dataStore.StoreMessages(ctx2, msgs, contact); err != nil {
-			log.Printf("Error performing initial save: %v", err)
-		}
-		savedL.Unlock()
-		fin2()
-	case <-done:
-		// Everything is done: no need to lock, save all messages, done
-		fin1()
-		t.Stop()
-		ctx2, fin2 := context.WithTimeout(ctx, 30*time.Second)
-		defer fin2()
-		return c.dataStore.StoreMessages(ctx2, msgs, contact)
-	}
-
-	<-done
+	wg.Wait()
 	fin1()
 
-	ctx3, fin3 := context.WithTimeout(ctx, 30*time.Second)
-	defer fin3()
-	if err := c.dataStore.StoreMessages(ctx3, msgs, contact); err != nil {
-		log.Printf("Error storing final message state: %v", err)
-		return err
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
-	return nil
+
+	// Record that we are saving messages, data will have been set to nil for
+	// fully processed messages.
+	for _, m := range msgs {
+		var s int
+		if m.Data != nil {
+			s = len(m.Data.TypeUrl) + len(m.Data.Value)
+		}
+		c.stats.MessageSaved(m.Destination.ServiceName, m.MessageType, false, s)
+	}
+	ctx2, fin2 := context.WithTimeout(ctx, 30*time.Second)
+	defer fin2()
+	return c.dataStore.StoreMessages(ctx2, msgs, contact)
 }
 
 // A liveService is a running Service, including implementation provided by the
@@ -323,7 +290,7 @@ type liveService struct {
 
 func (s *liveService) stop() {
 	if err := s.service.Stop(); err != nil {
-		log.Printf("Error shutting down service [%v]: %v", s.name, err)
+		log.Errorf("Error shutting down service [%v]: %v", s.name, err)
 	}
 }
 
@@ -339,5 +306,9 @@ func (s *liveService) Send(ctx context.Context, m *fspb.Message) error {
 
 // GetClientData implements service.Context.
 func (s *liveService) GetClientData(ctx context.Context, id common.ClientID) (*db.ClientData, error) {
-	return s.manager.dataStore.GetClientData(ctx, id)
+	cd, _, err := s.manager.cc.GetOrRead(ctx, id, s.manager.dataStore)
+	if err != nil {
+		return nil, err
+	}
+	return cd, nil
 }

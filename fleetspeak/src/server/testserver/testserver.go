@@ -18,6 +18,7 @@
 package testserver
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"net"
@@ -25,14 +26,13 @@ import (
 	"testing"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/comtesting"
-	"github.com/google/fleetspeak/fleetspeak/src/server/comms"
 	"github.com/google/fleetspeak/fleetspeak/src/server"
+	"github.com/google/fleetspeak/fleetspeak/src/server/comms"
 	"github.com/google/fleetspeak/fleetspeak/src/server/service"
 	"github.com/google/fleetspeak/fleetspeak/src/server/sqlite"
 
@@ -56,16 +56,13 @@ type FakeCommunicator struct {
 	Dest *Server
 }
 
-// Setup implements comms.Communicator.
 func (c FakeCommunicator) Setup(cc comms.Context) error {
 	c.Dest.CC = cc
 	return nil
 }
 
-// Start implements comms.Communicator.
 func (c FakeCommunicator) Start() error { return nil }
 
-// Stop implements comms.Communicator.
 func (c FakeCommunicator) Stop() {}
 
 // Make creates a server.Server using the provided communicators. It creates and
@@ -78,7 +75,7 @@ func Make(t *testing.T, testName, caseName string, comms []comms.Communicator) S
 	if err != nil {
 		t.Fatal(err)
 	}
-	log.Printf("Created database: %s", p)
+	log.Infof("Created database: %s", p)
 
 	var ret Server
 

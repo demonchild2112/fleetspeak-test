@@ -22,22 +22,24 @@
 //
 // SECURITY NOTE:
 //
-// The endpoints provide many of the fields presented to this interface.
+// The endpoints provide much of the data passed through this interface.
 // Implementations are responsible for using safe coding practices to prevent
 // SQL injection and similar attacks.
 package db
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math"
 	"time"
 
-	"context"
-
 	"github.com/google/fleetspeak/fleetspeak/src/common"
 	"github.com/google/fleetspeak/fleetspeak/src/server/ids"
 
+	"github.com/golang/protobuf/proto"
+
+	tpb "github.com/golang/protobuf/ptypes/timestamp"
 	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
 	mpb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak_monitoring"
 	spb "github.com/google/fleetspeak/fleetspeak/src/server/proto/fleetspeak_server"
@@ -45,7 +47,7 @@ import (
 
 // A Store describes the full persistence mechanism required by the base
 // fleetspeak system. These operations must be thread safe. These must also be
-// all-or-nothing, fully commited on success, and are otherwise trusted to be
+// all-or-nothing, fully committed on success, and are otherwise trusted to be
 // individually transactional.
 type Store interface {
 	MessageStore
@@ -65,6 +67,24 @@ type Store interface {
 type ClientData struct {
 	Key    []byte        // The der encoded public key for the client.
 	Labels []*fspb.Label // The client's labels.
+
+	// Whether the client_id has been blacklisted. Once blacklisted any contact
+	// from this client_id will result in an rekey request.
+	Blacklisted bool
+}
+
+// Clone returns a deep copy.
+func (d *ClientData) Clone() *ClientData {
+	ret := &ClientData{
+		Blacklisted: d.Blacklisted,
+	}
+	ret.Key = append(ret.Key, d.Key...)
+
+	ret.Labels = make([]*fspb.Label, 0, len(d.Labels))
+	for _, l := range d.Labels {
+		ret.Labels = append(ret.Labels, proto.Clone(l).(*fspb.Label))
+	}
+	return ret
 }
 
 // A ContactID identifies a communication with a client. The form is determined
@@ -93,15 +113,9 @@ type MessageStore interface {
 	// StoreMessages records msgs. If contact is not the empty string, it attaches
 	// them to the associated contact.
 	//
-	// It is not an error for a message to already exist. In this case, the only
-	// fields examined by the method are MessageId and Result, and Result will be
-	// updated if it is a supported transition:
-	//
-	// No Result -> Success Result
-	// No Result -> Failed Result
-	// Failed Result -> Success Result
-	//
-	// All other transitions are silently ignored.
+	// It is not an error for a message to already exist. In this case a success result
+	// will overwrite any result already present, and a failed result will overwrite
+	// an empty result. Otherwise the operation is silently dropped.
 	//
 	// A message is eligible to be returned by ClientMessagesForProcessing or the
 	// registered MessageProcessor iff it does not yet have a Result. Also,
@@ -121,8 +135,13 @@ type MessageStore interface {
 	// GetMessages retrieves specific messages.
 	GetMessages(ctx context.Context, ids []common.MessageID, wantData bool) ([]*fspb.Message, error)
 
-	// GetMessageStatus retrieves the current status of a message.
+	// GetMessageResult retrieves the current status of a message.
 	GetMessageResult(ctx context.Context, id common.MessageID) (*fspb.MessageResult, error)
+
+	// SetMessageResult retrieves the current status of a message. The dest
+	// parameter identifies the destination client, and must be the empty id for
+	// messages addressed to the server.
+	SetMessageResult(ctx context.Context, dest common.ClientID, id common.MessageID, res *fspb.MessageResult) error
 
 	// RegisterMessageProcessor installs a MessageProcessor which will be
 	// called when a message is overdue for processing.
@@ -145,6 +164,15 @@ type MessageProcessor interface {
 	ProcessMessages(msgs []*fspb.Message)
 }
 
+// ContactData provides basic information about a client's contact with a FS
+// server.
+type ContactData struct {
+	ClientID                 common.ClientID // ID of the client.
+	NonceSent, NonceReceived uint64          // Nonce sent to the client and received from the client.
+	Addr                     string          // Observed client network address.
+	ClientClock              *tpb.Timestamp  // Client's report of its current clock setting.
+}
+
 // ClientStore provides methods to store and retrieve information about clients.
 type ClientStore interface {
 	// ListClients returns basic information about clients. If ids is empty, it
@@ -164,10 +192,22 @@ type ClientStore interface {
 	// RemoveLabel records that a client no longer has a label.
 	RemoveClientLabel(ctx context.Context, id common.ClientID, l *fspb.Label) error
 
+	// BlacklistClient records that a client_id is no longer trusted and should be
+	// recreated.
+	BlacklistClient(ctx context.Context, id common.ClientID) error
+
 	// RecordClientContact records an authenticated contact with a
 	// client. On success provides a contact id - an opaque string which can
 	// be used to link messages to a contact.
-	RecordClientContact(ctx context.Context, id common.ClientID, nonceSent, nonceReceived uint64, addr string) (ContactID, error)
+	RecordClientContact(ctx context.Context, data ContactData) (ContactID, error)
+
+	// ListClientContacts lists all of the contacts in the database for a given
+	// client.
+	//
+	// NOTE: This method is explicitly permitted to return data up to 30 seconds
+	// stale. Also, it is normal (and expected) for a datastore to delete contact
+	// older than a few weeks.
+	ListClientContacts(ctx context.Context, id common.ClientID) ([]*spb.ClientContact, error)
 
 	// LinkMessagesToContact associates messages with a contact - it records
 	// that they were sent or received during the given contact.

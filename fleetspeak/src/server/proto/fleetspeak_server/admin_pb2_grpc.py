@@ -44,6 +44,11 @@ class AdminStub(object):
         request_serializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.ListClientsRequest.SerializeToString,
         response_deserializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.ListClientsResponse.FromString,
         )
+    self.ListClientContacts = channel.unary_unary(
+        '/fleetspeak.server.Admin/ListClientContacts',
+        request_serializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.ListClientContactsRequest.SerializeToString,
+        response_deserializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.ListClientContactsResponse.FromString,
+        )
     self.GetMessageStatus = channel.unary_unary(
         '/fleetspeak.server.Admin/GetMessageStatus',
         request_serializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.GetMessageStatusRequest.SerializeToString,
@@ -62,6 +67,11 @@ class AdminStub(object):
     self.KeepAlive = channel.unary_unary(
         '/fleetspeak.server.Admin/KeepAlive',
         request_serializer=fleetspeak_dot_src_dot_common_dot_proto_dot_fleetspeak_dot_common__pb2.EmptyMessage.SerializeToString,
+        response_deserializer=fleetspeak_dot_src_dot_common_dot_proto_dot_fleetspeak_dot_common__pb2.EmptyMessage.FromString,
+        )
+    self.BlacklistClient = channel.unary_unary(
+        '/fleetspeak.server.Admin/BlacklistClient',
+        request_serializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.BlacklistClientRequest.SerializeToString,
         response_deserializer=fleetspeak_dot_src_dot_common_dot_proto_dot_fleetspeak_dot_common__pb2.EmptyMessage.FromString,
         )
 
@@ -87,6 +97,13 @@ class AdminServicer(object):
 
   def ListClients(self, request, context):
     """ListClients lists the currently active FS clients.
+    """
+    context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+    context.set_details('Method not implemented!')
+    raise NotImplementedError('Method not implemented!')
+
+  def ListClientContacts(self, request, context):
+    """ListClientContacts lists the contact history for a client.
     """
     context.set_code(grpc.StatusCode.UNIMPLEMENTED)
     context.set_details('Method not implemented!')
@@ -123,6 +140,14 @@ class AdminServicer(object):
     context.set_details('Method not implemented!')
     raise NotImplementedError('Method not implemented!')
 
+  def BlacklistClient(self, request, context):
+    """BlacklistClient marks a client_id as invalid, forcing all Fleetspeak
+    clients using it to rekey.
+    """
+    context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+    context.set_details('Method not implemented!')
+    raise NotImplementedError('Method not implemented!')
+
 
 def add_AdminServicer_to_server(servicer, server):
   rpc_method_handlers = {
@@ -140,6 +165,11 @@ def add_AdminServicer_to_server(servicer, server):
           servicer.ListClients,
           request_deserializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.ListClientsRequest.FromString,
           response_serializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.ListClientsResponse.SerializeToString,
+      ),
+      'ListClientContacts': grpc.unary_unary_rpc_method_handler(
+          servicer.ListClientContacts,
+          request_deserializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.ListClientContactsRequest.FromString,
+          response_serializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.ListClientContactsResponse.SerializeToString,
       ),
       'GetMessageStatus': grpc.unary_unary_rpc_method_handler(
           servicer.GetMessageStatus,
@@ -159,6 +189,11 @@ def add_AdminServicer_to_server(servicer, server):
       'KeepAlive': grpc.unary_unary_rpc_method_handler(
           servicer.KeepAlive,
           request_deserializer=fleetspeak_dot_src_dot_common_dot_proto_dot_fleetspeak_dot_common__pb2.EmptyMessage.FromString,
+          response_serializer=fleetspeak_dot_src_dot_common_dot_proto_dot_fleetspeak_dot_common__pb2.EmptyMessage.SerializeToString,
+      ),
+      'BlacklistClient': grpc.unary_unary_rpc_method_handler(
+          servicer.BlacklistClient,
+          request_deserializer=fleetspeak_dot_src_dot_server_dot_proto_dot_fleetspeak__server_dot_admin__pb2.BlacklistClientRequest.FromString,
           response_serializer=fleetspeak_dot_src_dot_common_dot_proto_dot_fleetspeak_dot_common__pb2.EmptyMessage.SerializeToString,
       ),
   }

@@ -18,12 +18,12 @@ package stdinservice
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/ptypes"
 
 	"github.com/google/fleetspeak/fleetspeak/src/client/internal/monitoring"
@@ -54,21 +54,21 @@ func Factory(conf *fspb.ClientServiceConfig) (service.Service, error) {
 	}, nil
 }
 
-// StdinService implements Service.
+// StdinService implements a service.Service which runs a command one for each
+// message received, passing data to it through stdin and getting the results
+// through stdout/stderr.
 type StdinService struct {
 	conf   *fspb.ClientServiceConfig
 	ssConf *sspb.Config
 	sc     service.Context
 }
 
-// Start implements Service.
 func (s *StdinService) Start(sc service.Context) error {
 	s.sc = sc
 
 	return nil
 }
 
-// ProcessMessage implements Service.
 func (s *StdinService) ProcessMessage(ctx context.Context, m *fspb.Message) error {
 	om := &sspb.OutputMessage{}
 
@@ -97,7 +97,7 @@ func (s *StdinService) ProcessMessage(ctx context.Context, m *fspb.Message) erro
 	ruf := monitoring.ResourceUsageFetcher{}
 	initialRU, ruErr := ruf.ResourceUsageForPID(cmd.Process.Pid)
 	if ruErr != nil {
-		log.Printf("Failed to get resource usage for process: %v", ruErr)
+		log.Errorf("Failed to get resource usage for process: %v", ruErr)
 	}
 
 	waitChan := make(chan error)
@@ -114,7 +114,7 @@ func (s *StdinService) ProcessMessage(ctx context.Context, m *fspb.Message) erro
 
 		// The error message string literal is a copypaste from exec_unix.go .
 		if e := cmd.Process.Kill(); e != nil && e.Error() != "os: process already finished" {
-			err = fmt.Errorf("%v; also, an error occured while killing the process: %v", err, e)
+			err = fmt.Errorf("%v; also, an error occurred while killing the process: %v", err, e)
 		}
 
 		e, ok := <-waitChan
@@ -142,7 +142,7 @@ func (s *StdinService) ProcessMessage(ctx context.Context, m *fspb.Message) erro
 	finalRU := ruf.ResourceUsageFromFinishedCmd(cmd)
 	aggRU, ruErr := monitoring.AggregateResourceUsageForFinishedCmd(initialRU, finalRU)
 	if ruErr != nil {
-		log.Printf("Aggregation of resource-usage data failed: %v", ruErr)
+		log.Errorf("Aggregation of resource-usage data failed: %v", ruErr)
 	} else {
 		om.ResourceUsage = aggRU
 	}
@@ -155,7 +155,6 @@ func (s *StdinService) ProcessMessage(ctx context.Context, m *fspb.Message) erro
 	return nil
 }
 
-// Stop implements Service.
 func (s *StdinService) Stop() error {
 	return nil
 }

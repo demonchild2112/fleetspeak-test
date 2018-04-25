@@ -21,13 +21,18 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/golang/protobuf/ptypes"
+
 	"github.com/google/fleetspeak/fleetspeak/src/client/channel"
+
+	fcpb "github.com/google/fleetspeak/fleetspeak/src/client/channel/proto/fleetspeak_channel"
+	fspb "github.com/google/fleetspeak/fleetspeak/src/common/proto/fleetspeak"
 )
 
 // Init initializes the library, assuming that we are in a process started by
 // fleetspeak. If successful, it returns a channel.Channel which should be used
 // to communicate with the fleetspeak system.
-func Init() (*channel.Channel, error) {
+func Init(version string) (*channel.Channel, error) {
 	strInFd := os.Getenv("FLEETSPEAK_COMMS_CHANNEL_INFD")
 	if strInFd == "" {
 		return nil, errors.New("environment variable FLEETSPEAK_COMMS_CHANNEL_INFD not set")
@@ -51,6 +56,18 @@ func Init() (*channel.Channel, error) {
 	}
 
 	pw := os.NewFile(uintptr(outFd), "-")
-
-	return channel.New(pr, pw), nil
+	c := channel.New(pr, pw)
+	sd, err := ptypes.MarshalAny(&fcpb.StartupData{
+		Pid:     int64(os.Getpid()),
+		Version: version,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("unable to marshal StartupData: %v", err)
+	}
+	c.Out <- &fspb.Message{
+		MessageType: "StartupData",
+		Destination: &fspb.Address{ServiceName: "system"},
+		Data:        sd,
+	}
+	return c, nil
 }

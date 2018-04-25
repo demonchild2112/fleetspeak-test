@@ -15,13 +15,13 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"sync"
 	"time"
 
-	"log"
-	"context"
+	log "github.com/golang/glog"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 
@@ -52,15 +52,20 @@ type systemService struct {
 	wait          sync.WaitGroup
 }
 
-// Start implements Service.
 func (s *systemService) Start(sc service.Context) error {
 	s.sc = sc
 	s.done = make(chan struct{})
-	rum, err := monitoring.NewResourceUsageMonitor(
-		s.sc, "system", s.client.pid, s.client.startTime, StatsSamplePeriod, StatsSampleSize, s.done)
+	rum, err := monitoring.New(s.sc, monitoring.ResourceUsageMonitorParams{
+		Scope:            "system",
+		Pid:              s.client.pid,
+		ProcessStartTime: s.client.startTime,
+		MaxSamplePeriod:  StatsSamplePeriod,
+		SampleSize:       StatsSampleSize,
+		Done:             s.done,
+	})
 	if err != nil {
 		rum = nil
-		log.Printf("Failed to start resource-usage monitor: %v", err)
+		log.Errorf("Failed to start resource-usage monitor: %v", err)
 	}
 	s.wait.Add(4)
 	// TODO: call pollRevokedCerts on startup.
@@ -70,20 +75,24 @@ func (s *systemService) Start(sc service.Context) error {
 	go func() {
 		defer s.wait.Done()
 		if rum != nil {
-			rum.StatsReporterLoop()
+			rum.Run()
 		}
 	}()
 	return nil
 }
 
-// ProcessMessage implements Service.
 func (s *systemService) ProcessMessage(_ context.Context, m *fspb.Message) error {
-	// TODO: Add support to handle incoming messages that, e.g.,
-	// configure a new service on the client or request a rekey.
+	if m.MessageType == "RekeyRequest" {
+		if err := s.client.config.Rekey(); err != nil {
+			// Very unlikely.
+			return fmt.Errorf("unable to rekey client: %v", err)
+		}
+		s.client.config.SendConfigUpdate()
+		return nil
+	}
 	return fmt.Errorf("unable to process message of type: %v", m.MessageType)
 }
 
-// Stop implements Service.
 func (s *systemService) Stop() error {
 	close(s.done)
 	s.wait.Wait()
@@ -122,9 +131,10 @@ func (s *systemService) ackLoop() {
 					MessageType: "MessageAck",
 					Priority:    fspb.Message_HIGH,
 					Data:        d,
+					Background:  true,
 				},
 			}); err != nil {
-				log.Printf("error acknowledging message: %v", err)
+				log.Errorf("error acknowledging message: %v", err)
 			}
 			c()
 		}
@@ -149,9 +159,10 @@ func (s *systemService) errLoop() {
 					MessageType: "MessageError",
 					Priority:    fspb.Message_HIGH,
 					Data:        d,
+					Background:  true,
 				},
 			}); err != nil {
-				log.Printf("error reporting message error: %v", err)
+				log.Errorf("error reporting message error: %v", err)
 			}
 			c()
 		}
@@ -180,9 +191,10 @@ func (s *systemService) cfgLoop() {
 					MessageType: "ClientInfo",
 					Priority:    fspb.Message_HIGH,
 					Data:        d,
+					Background:  true,
 				},
 			}); err != nil {
-				log.Printf("error reporting configuration change: %v", err)
+				log.Errorf("error reporting configuration change: %v", err)
 			}
 			c()
 		}
@@ -194,14 +206,14 @@ func (s *systemService) pollRevokedCerts() {
 	defer c()
 	data, _, err := s.sc.GetFileIfModified(ctx, "RevokedCertificates", time.Time{})
 	if err != nil {
-		log.Printf("Unable to get revoked certificate list: %v", err)
+		log.Errorf("Unable to get revoked certificate list: %v", err)
 		return
 	}
 	defer data.Close()
 
 	b, err := ioutil.ReadAll(data)
 	if err != nil {
-		log.Printf("Unable to read revoked certificate list: %v", err)
+		log.Errorf("Unable to read revoked certificate list: %v", err)
 		return
 	}
 	if len(b) == 0 {
@@ -209,7 +221,7 @@ func (s *systemService) pollRevokedCerts() {
 	}
 	var l fspb.RevokedCertificateList
 	if err := proto.Unmarshal(b, &l); err != nil {
-		log.Printf("Unable to parse revoked certificate list: %v", err)
+		log.Errorf("Unable to parse revoked certificate list: %v", err)
 		return
 	}
 	s.client.config.AddRevokedSerials(l.Serials)
