@@ -12,12 +12,13 @@ clone_folder: C:\gopath\src\github.com\google\fleetspeak
 # version of go (so no need to define the env variable here).
 environment:
   GOPATH: C:\gopath
+  PATH: %PATH%;C:\mingw-w64\x86_64-7.2.0-posix-seh-rt_v5-rev1\mingw64\bin
 
 install:
 - python --version
 - go version
-# Ensure gcc compiler is in the PATH (for cgo compilation).
-- ps: $env:PATH += ';C:\mingw-w64\x86_64-7.2.0-posix-seh-rt_v5-rev1' ; go get -v -t ./...  # Install dependencies.
+- ps: Write-Output $env:PATH
+- go get -v -t ./...  # Install dependencies.
 
 build_script:
 - >-
@@ -29,3 +30,4 @@ build_script:
 
 test_script:
 - go test ./... --timeout 90s
+
