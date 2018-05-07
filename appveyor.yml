@@ -12,7 +12,7 @@ clone_folder: C:\gopath\src\github.com\google\fleetspeak
 # version of go (so no need to define the env variable here).
 environment:
   GOPATH: C:\gopath
-  PATH: %PATH%;C:\mingw-w64\x86_64-7.2.0-posix-seh-rt_v5-rev1\mingw64\bin
+  PATH: '%PATH%;C:\mingw-w64\x86_64-7.2.0-posix-seh-rt_v5-rev1\mingw64\bin'
 
 install:
 - python --version
