@@ -14,8 +14,8 @@ environment:
   GOPATH: C:\gopath
 
 install:
-- ps: python --version
-- ps: go version
+- python --version
+- go version
 - ps: Write-Output $env:PATH
 
 before_build:
