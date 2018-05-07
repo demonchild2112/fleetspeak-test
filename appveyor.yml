@@ -6,10 +6,12 @@ image:
 # Clone repo to where the go toolchain expects it to be.
 clone_folder: C:\gopath\src\github.com\google\fleetspeak
 
-environment:
+# Set GOPATH so the go toolchain can find the repo.
+#
 # Default GOROOT is C:\go, which is where appveyor installs the latest
 # version of go (so no need to define the env variable here).
-- GOPATH: C:\gopath
+environment:
+  GOPATH: C:\gopath
 
 install:
 - ps: python --version
