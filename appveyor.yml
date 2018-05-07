@@ -3,23 +3,29 @@ platform: x64
 image:
 - Visual Studio 2017
 
-# Clone repo to where the go toolchain expects it to be.
+# Adhere to the directory structure imposed on us by the go toolchain.
 clone_folder: C:\gopath\src\github.com\google\fleetspeak
 
-# Set GOPATH so the go toolchain can find the repo.
-#
-# Default GOROOT is C:\go, which is where appveyor installs the latest
-# version of go (so no need to define the env variable here).
 environment:
+  # Set GOPATH so the go toolchain can find the repo.
+  #
+  # Default GOROOT is C:\go, which is where appveyor installs the latest
+  # version of go (so no need to define the env variable here).
   GOPATH: C:\gopath
+
+  # Make sure the gcc compiler is in the PATH (for cgo compilation).
   PATH: '%PATH%;C:\mingw-w64\x86_64-7.2.0-posix-seh-rt_v5-rev1\mingw64\bin'
 
 install:
 - python --version
 - go version
+- dir C:\Python27\Scripts
+- pip show virtualenv
+- pip install virtualenv
 - ps: Write-Output $env:PATH
 - go get -v -t ./...  # Install dependencies.
 
+# Build binaries needed by tests.
 build_script:
 - >-
   go build -o fleetspeak/src/client/socketservice/testclient/testclient.exe
@@ -28,6 +34,6 @@ build_script:
   go build -o fleetspeak/src/client/daemonservice/testclient/testclient.exe
   github.com/google/fleetspeak/fleetspeak/src/client/daemonservice/testclient
 
+# Build all Fleetspeak packages, and run all tests.
 test_script:
 - go test ./... --timeout 90s
-
