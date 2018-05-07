@@ -19,11 +19,11 @@ environment:
 install:
 - python --version
 - go version
-- dir C:\Python27\Scripts
-- pip show virtualenv
-- pip install virtualenv
 - ps: Write-Output $env:PATH
-- go get -v -t ./...  # Install dependencies.
+- go get -v -t ./...  # Install go dependencies.
+- virtualenv C:\fsenv
+- C:\fsenv\Scripts\activate.bat
+- pip install -e .
 
 # Build binaries needed by tests.
 build_script:
@@ -36,4 +36,5 @@ build_script:
 
 # Build all Fleetspeak packages, and run all tests.
 test_script:
+- pip show fleetspeak
 - go test ./... --timeout 90s
