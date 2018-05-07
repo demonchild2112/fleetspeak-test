@@ -16,11 +16,8 @@ environment:
 install:
 - python --version
 - go version
-- ps: Write-Output $env:PATH
-
-before_build:
 # Ensure gcc compiler is in the PATH (for cgo compilation).
-- ps: $env:PATH += ';C:\mingw-w64\x86_64-7.2.0-posix-seh-rt_v5-rev1'
+- ps: $env:PATH += ';C:\mingw-w64\x86_64-7.2.0-posix-seh-rt_v5-rev1' ; go get -v -t ./...  # Install dependencies.
 
 build_script:
 - >-
@@ -29,4 +26,6 @@ build_script:
 - >-
   go build -o fleetspeak/src/client/daemonservice/testclient/testclient.exe
   github.com/google/fleetspeak/fleetspeak/src/client/daemonservice/testclient
-- go build -v ./...
+
+test_script:
+- go test ./... --timeout 90s
